@@ -296,6 +296,17 @@ if(TRITON_BUILD_PYTHON_MODULE)
     target_link_libraries(triton PRIVATE z)
   endif()
   target_link_options(triton PRIVATE ${LLVM_LDFLAGS})
+
+  get_target_property(my_link_libs triton LINK_LIBRARIES)
+  message(STATUS "AXM TRITON LINK_LIBRARIES: ${my_link_libs}")
+
+  # Install triton library
+  install(TARGETS triton
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+  )
+
 endif()
 
 if (UNIX AND NOT APPLE)
