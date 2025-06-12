@@ -19,8 +19,8 @@ list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 
 # Options
 option(TRITON_BUILD_TUTORIALS "Build C++ Triton tutorials" ON)
-option(TRITON_BUILD_PYTHON_MODULE "Build Python Triton bindings" OFF)
-option(TRITON_BUILD_PROTON "Build the Triton Proton profiler" ON)
+option(TRITON_BUILD_PYTHON_MODULE "Build Python Triton bindings" ON)
+option(TRITON_BUILD_PROTON "Build the Triton Proton profiler" OFF)
 option(TRITON_BUILD_UT "Build C++ Triton Unit Tests" ON)
 option(TRITON_BUILD_WITH_CCACHE "Build with ccache (if available)" ON)
 set(TRITON_CODEGEN_BACKENDS "" CACHE STRING "Enable different codegen backends")
@@ -280,7 +280,7 @@ if(TRITON_BUILD_PYTHON_MODULE)
 
   set(TRITON_BACKENDS_TUPLE "(${TRITON_BACKENDS_TUPLE})")
   add_compile_definitions(TRITON_BACKENDS_TUPLE=${TRITON_BACKENDS_TUPLE})
-  add_library(triton SHARED ${PYTHON_SRC_PATH}/main.cc
+  add_library(triton STATIC ${PYTHON_SRC_PATH}/main.cc
                   ${PYTHON_SRC_PATH}/ir.cc
                   ${PYTHON_SRC_PATH}/passes.cc
                   ${PYTHON_SRC_PATH}/interpreter.cc
@@ -296,6 +296,40 @@ if(TRITON_BUILD_PYTHON_MODULE)
     target_link_libraries(triton PRIVATE z)
   endif()
   target_link_options(triton PRIVATE ${LLVM_LDFLAGS})
+
+  # Install triton library and headers
+  install(TARGETS triton
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+  )
+
+  install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/include/triton/
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/triton
+    FILES_MATCHING
+      PATTERN "*.h" 
+      PATTERN "*.td"
+  )
+
+  install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/third_party/amd/include/
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/triton/amd
+    FILES_MATCHING
+      PATTERN "*.h" 
+      PATTERN "*.td"
+  )
+
+  install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/third_party/nvidia/include/
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/triton/nvidia
+    FILES_MATCHING 
+      PATTERN "*.h" 
+      PATTERN "*.td"
+  )
+
+  install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/third_party/f2reduce/
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/triton/f2reduce
+    FILES_MATCHING PATTERN "*.h"
+  )
+
 endif()
 
 if (UNIX AND NOT APPLE)
