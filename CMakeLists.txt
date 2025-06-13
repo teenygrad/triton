@@ -309,25 +309,15 @@ if(TRITON_BUILD_PYTHON_MODULE)
     FILES_MATCHING
       PATTERN "*.h" 
       PATTERN "*.td"
+      PATTERN "*.h.inc"
   )
 
-  install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/third_party/amd/include/
-    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/triton/amd
+  install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/third_party
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/triton
     FILES_MATCHING
       PATTERN "*.h" 
       PATTERN "*.td"
-  )
-
-  install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/third_party/nvidia/include/
-    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/triton/nvidia
-    FILES_MATCHING 
-      PATTERN "*.h" 
-      PATTERN "*.td"
-  )
-
-  install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/third_party/f2reduce/
-    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/triton/f2reduce
-    FILES_MATCHING PATTERN "*.h"
+      PATTERN "*.h.inc"
   )
 
 endif()
