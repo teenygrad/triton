@@ -240,9 +240,13 @@ if(TRITON_BUILD_PYTHON_MODULE)
     # LLVM
     LLVMPasses
     LLVMNVPTXCodeGen
-    # LLVMNVPTXAsmPrinter
     LLVMAMDGPUCodeGen
     LLVMAMDGPUAsmParser
+
+    # NVidia
+    NVGPUIR
+    NVGPUToLLVM
+    TritonNVIDIAGPUToLLVM
 
     Python3::Module
     pybind11::headers
