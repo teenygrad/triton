@@ -8,10 +8,9 @@ using ::mlir::triton::gpu::DotOperandEncodingAttr;
 using ::mlir::triton::gpu::getContigPerThread;
 using ::mlir::triton::gpu::getOrder;
 using ::mlir::triton::gpu::getShapePerCTA;
-using ::mlir::triton::gpu::getSizePerThread;
 using ::mlir::triton::gpu::getTotalElemsPerThread;
-using ::mlir::triton::gpu::isaDistributedLayout;
-using ::mlir::triton::gpu::SharedEncodingAttr;
+using ::mlir::triton::gpu::DistributedEncodingTrait;
+using ::mlir::triton::gpu::SwizzledSharedEncodingAttr;
 
 SmallVector<Value>
 getThreadIds(Value threadId, ArrayRef<unsigned int> shapePerCTATile,
@@ -30,10 +29,23 @@ getThreadIds(Value threadId, ArrayRef<unsigned int> shapePerCTATile,
   return threadIds;
 }
 
+// Compute shapePerCTATile from a BlockedEncodingAttr
+// (sizePerThread * threadsPerWarp * warpsPerCTA per dimension).
+static SmallVector<unsigned>
+getShapePerCTATileBlocked(BlockedEncodingAttr layout) {
+  auto spt = layout.getSizePerThread();
+  auto tpw = layout.getThreadsPerWarp();
+  auto wpc = layout.getWarpsPerCTA();
+  SmallVector<unsigned> shape;
+  for (auto [s, t, w] : llvm::zip(spt, tpw, wpc))
+    shape.push_back(s * t * w);
+  return shape;
+}
+
 // Get shapePerCTATile for M or N axis.
 int getShapePerCTATileForMN(BlockedEncodingAttr layout, bool isM) {
   auto order = layout.getOrder();
-  auto shapePerCTATile = getShapePerCTATile(layout);
+  auto shapePerCTATile = getShapePerCTATileBlocked(layout);
 
   int mShapePerCTATile =
       order[0] == 1 ? shapePerCTATile[order[1]] : shapePerCTATile[order[0]];
@@ -45,7 +57,7 @@ int getShapePerCTATileForMN(BlockedEncodingAttr layout, bool isM) {
 // Get sizePerThread for M or N axis.
 int getSizePerThreadForMN(BlockedEncodingAttr layout, bool isM) {
   auto order = layout.getOrder();
-  auto sizePerThread = getSizePerThread(layout);
+  auto sizePerThread = layout.getSizePerThread();
 
   int mSizePerThread =
       order[0] == 1 ? sizePerThread[order[1]] : sizePerThread[order[0]];
@@ -90,8 +102,8 @@ ValueTable getValueTableFromStruct(Value val, int K, int n0, int shapePerCTA,
 Value loadAFMA(Value A, Value llA, BlockedEncodingAttr dLayout, Value thread,
                Location loc, TritonGPUToSPIRVTypeConverter *typeConverter,
                ConversionPatternRewriter &rewriter) {
-  auto aTensorTy = A.getType().cast<RankedTensorType>();
-  auto aLayout = aTensorTy.getEncoding().cast<SharedEncodingAttr>();
+  auto aTensorTy = cast<RankedTensorType>(A.getType());
+  auto aLayout = cast<SwizzledSharedEncodingAttr>(aTensorTy.getEncoding());
   auto aShapePerCTA = getShapePerCTA(aTensorTy);
 
   auto aOrder = aLayout.getOrder();
@@ -108,8 +120,8 @@ Value loadAFMA(Value A, Value llA, BlockedEncodingAttr dLayout, Value thread,
   int K = aShapePerCTA[1];
   int M = aShapePerCTA[0];
 
-  auto shapePerCTATile = getShapePerCTATile(dLayout);
-  auto sizePerThread = getSizePerThread(dLayout);
+  auto shapePerCTATile = getShapePerCTATileBlocked(dLayout);
+  auto sizePerThread = dLayout.getSizePerThread();
 
   Value _0 = i32_val(0);
 
@@ -126,7 +138,7 @@ Value loadAFMA(Value A, Value llA, BlockedEncodingAttr dLayout, Value thread,
   for (int i = 0; i < aNumPtr; ++i) {
     aOff[i] = add(mul(offA0, strideA0), mul(offA1, strideA1));
   }
-  auto elemTy = A.getType().cast<RankedTensorType>().getElementType();
+  auto elemTy = cast<RankedTensorType>(A.getType()).getElementType();
 
   Type ptrTy = ptr_ty(elemTy, spirv::StorageClass::Workgroup);
   SmallVector<Value> aPtrs(aNumPtr);
@@ -154,8 +166,8 @@ Value loadAFMA(Value A, Value llA, BlockedEncodingAttr dLayout, Value thread,
 Value loadBFMA(Value B, Value llB, BlockedEncodingAttr dLayout, Value thread,
                Location loc, TritonGPUToSPIRVTypeConverter *typeConverter,
                ConversionPatternRewriter &rewriter) {
-  auto bTensorTy = B.getType().cast<RankedTensorType>();
-  auto bLayout = bTensorTy.getEncoding().cast<SharedEncodingAttr>();
+  auto bTensorTy = cast<RankedTensorType>(B.getType());
+  auto bLayout = cast<SwizzledSharedEncodingAttr>(bTensorTy.getEncoding());
   auto bShapePerCTA = getShapePerCTA(bTensorTy);
 
   auto bOrder = bLayout.getOrder();
@@ -172,8 +184,8 @@ Value loadBFMA(Value B, Value llB, BlockedEncodingAttr dLayout, Value thread,
   int K = bShapePerCTA[0];
   int N = bShapePerCTA[1];
 
-  auto shapePerCTATile = getShapePerCTATile(dLayout);
-  auto sizePerThread = getSizePerThread(dLayout);
+  auto shapePerCTATile = getShapePerCTATileBlocked(dLayout);
+  auto sizePerThread = dLayout.getSizePerThread();
 
   Value _0 = i32_val(0);
 
@@ -190,7 +202,7 @@ Value loadBFMA(Value B, Value llB, BlockedEncodingAttr dLayout, Value thread,
   for (int i = 0; i < bNumPtr; ++i) {
     bOff[i] = add(mul(offB0, strideB0), mul(offB1, strideB1));
   }
-  auto elemTy = B.getType().cast<RankedTensorType>().getElementType();
+  auto elemTy = cast<RankedTensorType>(B.getType()).getElementType();
 
   Type ptrTy = ptr_ty(elemTy, spirv::StorageClass::Workgroup);
   SmallVector<Value> bPtrs(bNumPtr);

@@ -6,7 +6,7 @@
 void populateTritonGPUToSPIRVPatterns(
     TritonGPUToSPIRVTypeConverter &typeConverter, mlir::MLIRContext *context,
     mlir::RewritePatternSet &patterns, int numWarps,
-    mlir::ModuleAxisInfoAnalysis &axisInfoAnalysis,
+    mlir::triton::ModuleAxisInfoAnalysis &axisInfoAnalysis,
     mlir::ModuleAllocation &allocation,
     ConvertTritonGPUOpToSPIRVPatternBase::IndexCacheInfo &indexCacheInfo,
     mlir::PatternBenefit benefit);

@@ -9,8 +9,10 @@ using namespace mlir::triton;
 using ::mlir::triton::gpu::BlockedEncodingAttr;
 using ::mlir::triton::gpu::DotOperandEncodingAttr;
 using ::mlir::triton::gpu::getTotalElemsPerThread;
+using ::mlir::triton::gpu::MemDescType;
 using ::mlir::triton::gpu::NvidiaMmaEncodingAttr;
-using ::mlir::triton::gpu::SharedEncodingAttr;
+using ::mlir::triton::gpu::SharedEncodingTrait;
+using ::mlir::triton::gpu::SwizzledSharedEncodingAttr;
 using ::mlir::triton::gpu::SliceEncodingAttr;
 
 /// Mapping between SPIR-V storage classes to Triton memory spaces.
@@ -66,6 +68,9 @@ TritonGPUToSPIRVTypeConverter::TritonGPUToSPIRVTypeConverter(
   addConversion([&](RankedTensorType type) -> std::optional<Type> {
     return convertTritonTensorType(type);
   });
+  addConversion([&](MemDescType type) -> std::optional<Type> {
+    return convertMemDescType(type);
+  });
   addConversion([&](mlir::VectorType type) -> std::optional<Type> {
     // Recursively translate vector type
     return mlir::VectorType::get(type.getShape(),
@@ -99,18 +104,18 @@ TritonGPUToSPIRVTypeConverter::TritonGPUToSPIRVTypeConverter(
   // non-SPIRV types persist after an SPIRV conversion.
   addSourceMaterialization([&](OpBuilder &builder, Type resultType,
                                ValueRange inputs,
-                               Location loc) -> std::optional<Value> {
+                               Location loc) -> Value {
     if (inputs.size() != 1)
-      return std::nullopt;
+      return Value();
 
     return builder.create<UnrealizedConversionCastOp>(loc, resultType, inputs)
         .getResult(0);
   });
   addTargetMaterialization([&](OpBuilder &builder, Type resultType,
                                ValueRange inputs,
-                               Location loc) -> std::optional<Value> {
+                               Location loc) -> Value {
     if (inputs.size() != 1)
-      return std::nullopt;
+      return Value();
 
     return builder.create<UnrealizedConversionCastOp>(loc, resultType, inputs)
         .getResult(0);
@@ -130,7 +135,7 @@ Type TritonGPUToSPIRVTypeConverter::convertTritonPointerType(
 Value TritonGPUToSPIRVTypeConverter::packLLElements(
     Location loc, ValueRange resultVals, ConversionPatternRewriter &rewriter,
     Type type) {
-  auto structType = this->convertType(type).dyn_cast<spirv::StructType>();
+  auto structType = dyn_cast<spirv::StructType>(this->convertType(type));
   if (!structType) {
     assert(resultVals.size() == 1);
     return *resultVals.begin();
@@ -165,11 +170,11 @@ SmallVector<Value> TritonGPUToSPIRVTypeConverter::unpackLLElements(
     Type type) {
   assert(bool(spirvStruct) && "can not unpack null values");
   if (spirvStruct.getType().isIntOrIndexOrFloat() ||
-      spirvStruct.getType().isa<triton::PointerType>() ||
-      spirvStruct.getType().isa<spirv::PointerType>())
+      isa<triton::PointerType>(spirvStruct.getType()) ||
+      isa<spirv::PointerType>(spirvStruct.getType()))
     return {spirvStruct};
   auto types =
-      spirvStruct.getType().cast<spirv::StructType>().getElementTypes();
+      cast<spirv::StructType>(spirvStruct.getType()).getElementTypes();
   SmallVector<Value> results(types.size());
   for (unsigned i = 0; i < types.size(); ++i) {
     Type type = types[i];
@@ -183,10 +188,10 @@ Type TritonGPUToSPIRVTypeConverter::getElementTypeForStruct(
   auto ctx = type.getContext();
   Attribute layout = type.getEncoding();
   Type elemTy = convertType(type.getElementType());
-  auto dotOpLayout = layout.dyn_cast<DotOperandEncodingAttr>();
+  auto dotOpLayout = dyn_cast<DotOperandEncodingAttr>(layout);
   if (!dotOpLayout)
     return elemTy;
-  auto mmaParent = dotOpLayout.getParent().dyn_cast<NvidiaMmaEncodingAttr>();
+  auto mmaParent = dyn_cast<NvidiaMmaEncodingAttr>(dotOpLayout.getParent());
   if (!mmaParent)
     return elemTy;
   if (mmaParent.isAmpere()) {
@@ -206,7 +211,10 @@ Type TritonGPUToSPIRVTypeConverter::convertTritonTensorType(
   SmallVector<int64_t> shape(type.getShape().begin(), type.getShape().end());
   Type eltType = getElementTypeForStruct(type);
 
-  if (auto shared_layout = layout.dyn_cast<SharedEncodingAttr>()) {
+  // RankedTensorType with shared encoding is no longer used in current Triton
+  // (shared memory uses MemDescType now). This branch is retained for
+  // compatibility with any legacy shared-memory tensor types.
+  if (mlir::isa<SharedEncodingTrait>(layout)) {
     SmallVector<Type, 4> types;
     // base ptr
     auto ptrType =
@@ -223,5 +231,25 @@ Type TritonGPUToSPIRVTypeConverter::convertTritonTensorType(
 
   unsigned numElementsPerThread = getTotalElemsPerThread(type);
   SmallVector<Type, 4> types(numElementsPerThread, eltType);
+  return spirv::StructType::get(types);
+}
+
+Type TritonGPUToSPIRVTypeConverter::convertMemDescType(MemDescType type) {
+  auto ctx = type.getContext();
+  Type eltType = convertType(type.getElementType());
+  // base ptr into workgroup (shared) memory
+  auto ptrType =
+      spirv::PointerType::get(eltType, spirv::StorageClass::Workgroup);
+  SmallVector<Type, 4> types;
+  types.push_back(ptrType);
+  auto rank = type.getRank();
+  // offsets (one per dimension)
+  for (auto i = 0; i < rank; i++) {
+    types.push_back(IntegerType::get(ctx, 32));
+  }
+  // strides (one per dimension)
+  for (auto i = 0; i < rank; i++) {
+    types.push_back(IntegerType::get(ctx, 32));
+  }
   return spirv::StructType::get(types);
 }

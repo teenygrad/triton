@@ -36,15 +36,15 @@ LogicalResult convertFMADot(triton::DotOp op, triton::DotOp::Adaptor adaptor,
   auto C = op.getC();
   auto D = op.getResult();
 
-  auto aTensorTy = A.getType().cast<RankedTensorType>();
-  auto bTensorTy = B.getType().cast<RankedTensorType>();
-  auto dTensorTy = D.getType().cast<RankedTensorType>();
+  auto aTensorTy = cast<RankedTensorType>(A.getType());
+  auto bTensorTy = cast<RankedTensorType>(B.getType());
+  auto dTensorTy = cast<RankedTensorType>(D.getType());
 
   auto aShapePerCTA = getShapePerCTA(aTensorTy);
   auto bShapePerCTA = getShapePerCTA(bTensorTy);
 
   BlockedEncodingAttr dLayout =
-      dTensorTy.getEncoding().cast<BlockedEncodingAttr>();
+      cast<BlockedEncodingAttr>(dTensorTy.getEncoding());
   auto order = dLayout.getOrder();
   auto cc =
       typeConverter->unpackLLElements(loc, adaptor.getC(), rewriter, dTensorTy);
@@ -52,8 +52,15 @@ LogicalResult convertFMADot(triton::DotOp op, triton::DotOp::Adaptor adaptor,
   Value llA = adaptor.getA();
   Value llB = adaptor.getB();
 
-  auto sizePerThread = getSizePerThread(dLayout);
-  auto shapePerCTATile = getShapePerCTATile(dLayout);
+  auto sizePerThread = dLayout.getSizePerThread();
+  // Compute shapePerCTATile = sizePerThread * threadsPerWarp * warpsPerCTA
+  SmallVector<unsigned> shapePerCTATile;
+  {
+    auto tpw = dLayout.getThreadsPerWarp();
+    auto wpc = dLayout.getWarpsPerCTA();
+    for (auto [s, t, w] : llvm::zip(sizePerThread, tpw, wpc))
+      shapePerCTATile.push_back(s * t * w);
+  }
 
   int K = aShapePerCTA[1];
   int M = aShapePerCTA[0];

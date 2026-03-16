@@ -21,7 +21,7 @@ struct SplatOpSPIRVConversion
                                   TritonGPUToSPIRVTypeConverter *typeConverter,
                                   ConversionPatternRewriter &rewriter,
                                   Location loc) {
-    auto tensorTy = resType.cast<RankedTensorType>();
+    auto tensorTy = cast<RankedTensorType>(resType);
     auto srcType = typeConverter->convertType(elemType);
     auto spirvSrc = bitcast(constVal, srcType);
     size_t elemsPerThread = getTotalElemsPerThread(tensorTy);
@@ -61,12 +61,12 @@ struct ArithConstantSplatOpSPIRVConversion
   matchAndRewrite(arith::ConstantOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
     auto value = op.getValue();
-    if (!value.dyn_cast<SplatElementsAttr>())
+    if (!dyn_cast<SplatElementsAttr>(value))
       return failure();
 
     auto loc = op->getLoc();
 
-    auto values = op.getValue().dyn_cast<SplatElementsAttr>();
+    auto values = dyn_cast<SplatElementsAttr>(op.getValue());
     auto elemType = values.getElementType();
 
     Attribute val;
@@ -121,7 +121,7 @@ struct CatOpSPIRVConversion
   matchAndRewrite(CatOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
     Location loc = op->getLoc();
-    auto resultTy = op.getType().template cast<RankedTensorType>();
+    auto resultTy = cast<RankedTensorType>(op.getType());
     unsigned elems = getTotalElemsPerThread(resultTy);
     Type elemTy =
         this->getTypeConverter()->convertType(resultTy.getElementType());
@@ -155,12 +155,13 @@ struct ReshapeOpSPIRVConversion
   matchAndRewrite(ReshapeOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
     Location loc = op->getLoc();
-    auto resultTy = op.getType().template cast<RankedTensorType>();
-    auto srcTy = op.getSrc().getType().template cast<RankedTensorType>();
+    auto resultTy = cast<RankedTensorType>(op.getType());
+    auto srcTy = cast<RankedTensorType>(op.getSrc().getType());
     if (!op.getAllowReorder()) {
       // Only support trivial block layouts for now.
       auto mod = op->getParentOfType<ModuleOp>();
-      int numWarps = triton::gpu::TritonGPUDialect::getNumWarps(mod);
+      int numWarps = mod->getAttrOfType<IntegerAttr>(
+                        triton::gpu::AttrNumWarpsName).getInt();
       int threadsPerWarp =
           triton::gpu::TritonGPUDialect::getThreadsPerWarp(mod);
       int numCTAs = triton::gpu::TritonGPUDialect::getNumCTAs(mod);
@@ -196,12 +197,12 @@ struct ExpandDimsOpSPIRVConversion
     auto srcVals = this->getTypeConverter()->unpackLLElements(
         loc, adaptor.getSrc(), rewriter, op.getOperand().getType());
 
-    auto srcTy = op.getSrc().getType().cast<RankedTensorType>();
-    auto resultTy = op.getType().template cast<RankedTensorType>();
+    auto srcTy = cast<RankedTensorType>(op.getSrc().getType());
+    auto resultTy = cast<RankedTensorType>(op.getType());
 
-    assert(srcTy.getEncoding().isa<SliceEncodingAttr>() &&
+    assert(isa<SliceEncodingAttr>(srcTy.getEncoding()) &&
            "ExpandDimsOp only support SliceEncodingAttr");
-    auto srcLayout = srcTy.getEncoding().dyn_cast<SliceEncodingAttr>();
+    auto srcLayout = dyn_cast<SliceEncodingAttr>(srcTy.getEncoding());
     auto resultLayout = resultTy.getEncoding();
 
     auto srcOffsets = emitOffsetForLayout(srcLayout, srcTy);
@@ -250,7 +251,7 @@ struct TransOpSPIRVConversion
 void populateViewOpToSPIRVPatterns(
     TritonGPUToSPIRVTypeConverter &typeConverter, mlir::MLIRContext *context,
     mlir::RewritePatternSet &patterns, int numWarps,
-    mlir::ModuleAxisInfoAnalysis &axisInfoAnalysis,
+    mlir::triton::ModuleAxisInfoAnalysis &axisInfoAnalysis,
     mlir::ModuleAllocation *allocation, mlir::Value smem,
     mlir::PatternBenefit benefit, bool supportBFConvOp) {
   patterns.add<ReshapeOpSPIRVConversion>(typeConverter, context, benefit);

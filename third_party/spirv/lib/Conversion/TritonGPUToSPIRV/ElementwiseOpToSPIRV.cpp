@@ -8,8 +8,8 @@ using ::mlir::triton::gpu::getTotalElemsPerThread;
 
 static SmallVector<Value> reorderValues(const SmallVector<Value> &values,
                                         Type inType, Type ouType) {
-  auto inTensorTy = inType.dyn_cast<RankedTensorType>();
-  auto ouTensorTy = ouType.dyn_cast<RankedTensorType>();
+  auto inTensorTy = mlir::dyn_cast<RankedTensorType>(inType);
+  auto ouTensorTy = mlir::dyn_cast<RankedTensorType>(ouType);
   if (!inTensorTy || !ouTensorTy)
     return values;
   auto inEncoding =
@@ -85,7 +85,7 @@ static SmallVector<Value> reorderValues(const SmallVector<Value> &values,
 
 inline Type getElementType(Value value) {
   auto type = value.getType();
-  if (auto tensorType = type.dyn_cast<RankedTensorType>())
+  if (auto tensorType = dyn_cast<RankedTensorType>(type))
     return tensorType.getElementType();
   return type;
 }
@@ -95,12 +95,12 @@ inline SmallVector<Value> unpackI32(const SmallVector<Value> &inValues,
                                     ConversionPatternRewriter &rewriter,
                                     Location loc,
                                     TypeConverter *typeConverter) {
-  auto tensorTy = srcTy.dyn_cast<RankedTensorType>();
+  auto tensorTy = dyn_cast<RankedTensorType>(srcTy);
   if (!tensorTy)
     return inValues;
   auto encoding =
-      tensorTy.getEncoding().dyn_cast<triton::gpu::DotOperandEncodingAttr>();
-  if (!(encoding && encoding.getParent().isa<triton::gpu::MmaEncodingTrait>()))
+      dyn_cast<triton::gpu::DotOperandEncodingAttr>(tensorTy.getEncoding());
+  if (!(encoding && isa<triton::gpu::MmaEncodingTrait>(encoding.getParent())))
     return inValues;
   SmallVector<Value> outValues;
   for (auto &v : inValues) {
@@ -119,12 +119,12 @@ inline SmallVector<Value> packI32(const SmallVector<Value> &inValues,
                                   Type srcTy,
                                   ConversionPatternRewriter &rewriter,
                                   Location loc, TypeConverter *typeConverter) {
-  auto tensorTy = srcTy.dyn_cast<RankedTensorType>();
+  auto tensorTy = dyn_cast<RankedTensorType>(srcTy);
   if (!tensorTy)
     return inValues;
   auto encoding =
-      tensorTy.getEncoding().dyn_cast<triton::gpu::DotOperandEncodingAttr>();
-  if (!(encoding && encoding.getParent().isa<triton::gpu::MmaEncodingTrait>()))
+      dyn_cast<triton::gpu::DotOperandEncodingAttr>(tensorTy.getEncoding());
+  if (!(encoding && isa<triton::gpu::MmaEncodingTrait>(encoding.getParent())))
     return inValues;
   SmallVector<Value> outValues;
   auto eltType = typeConverter->convertType(tensorTy.getElementType());
@@ -353,16 +353,16 @@ struct FpToFpOpSPIRVConversion
   matchAndRewrite(triton::FpToFpOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
     // llvm::outs() << 0 << "\n";
-    auto srcTensorType = op.getFrom().getType().cast<mlir::RankedTensorType>();
+    auto srcTensorType = cast<mlir::RankedTensorType>(op.getSrc().getType());
     auto dstTensorType =
-        op.getResult().getType().cast<mlir::RankedTensorType>();
+        cast<mlir::RankedTensorType>(op.getResult().getType());
     auto loc = op->getLoc();
     // check that the number of elements is divisible by 4
     // Get convertor
     auto cvtFunc = getConversionFunc(srcTensorType.getElementType(),
                                      dstTensorType.getElementType());
     // Unpack value
-    auto inVals = getTypeConverter()->unpackLLElements(loc, adaptor.getFrom(),
+    auto inVals = getTypeConverter()->unpackLLElements(loc, adaptor.getSrc(),
                                                        rewriter, srcTensorType);
     inVals =
         unpackI32(inVals, srcTensorType, rewriter, loc, getTypeConverter());
@@ -404,7 +404,7 @@ private:
     auto linkageTypeAttr =
         b.getAttr<::mlir::spirv::LinkageTypeAttr>(spirv::LinkageType::Import);
     auto linkageAttr = b.getAttr<::mlir::spirv::LinkageAttributesAttr>(
-        funcName.str(), linkageTypeAttr);
+        StringAttr::get(b.getContext(), funcName), linkageTypeAttr);
     attributes.set("linkage_attributes", linkageAttr);
     auto ret =
         b.create<spirv::FuncOp>(v.getLoc(), funcName, funcType,
@@ -497,7 +497,7 @@ static bool isBoolScalarOrVector(Type type) {
   if (type.isInteger(1))
     return true;
 
-  if (auto vecType = type.dyn_cast<VectorType>())
+  if (auto vecType = llvm::dyn_cast<VectorType>(type))
     return vecType.getElementType().isInteger(1);
 
   return false;
@@ -635,8 +635,9 @@ struct ExternElementwiseSPIRVConversion
 
     spirv::FuncOp funcOp = appendOrGetFuncOp(rewriter, op, funcName, funcType);
 
+    auto calleeRef = FlatSymbolRefAttr::get(rewriter.getContext(), funcName);
     return rewriter
-        .create<spirv::FunctionCallOp>(loc, elemTy, funcName, operands)
+        .create<spirv::FunctionCallOp>(loc, elemTy, calleeRef, operands)
         .getResult(0);
   }
 
@@ -666,7 +667,7 @@ private:
     auto linkageTypeAttr =
         b.getAttr<::mlir::spirv::LinkageTypeAttr>(spirv::LinkageType::Import);
     auto linkageAttr = b.getAttr<::mlir::spirv::LinkageAttributesAttr>(
-        funcName.str(), linkageTypeAttr);
+        StringAttr::get(b.getContext(), funcName), linkageTypeAttr);
     ret.getOperation()->setAttr("linkage_attributes", linkageAttr);
     return ret;
   }

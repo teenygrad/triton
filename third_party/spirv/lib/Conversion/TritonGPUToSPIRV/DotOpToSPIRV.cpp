@@ -23,15 +23,13 @@ struct DotOpSPIRVConversion
     Value D = op.getResult();
 
     // Here we assume the DotOp's operands always comes from shared memory.
-    auto AShape = A.getType().cast<RankedTensorType>().getShape();
+    auto AShape = cast<RankedTensorType>(A.getType()).getShape();
     size_t reduceAxis = 1;
     unsigned K = AShape[reduceAxis];
     bool isOuter = K == 1;
 
-    if (D.getType()
-            .cast<RankedTensorType>()
-            .getEncoding()
-            .isa<BlockedEncodingAttr>())
+    if (isa<BlockedEncodingAttr>(
+            cast<RankedTensorType>(D.getType()).getEncoding()))
       return convertFMADot(op, adaptor, getTypeConverter(), rewriter);
 
     llvm::report_fatal_error(

@@ -9,7 +9,6 @@ using namespace mlir::triton;
 
 using ::mlir::spirv::getSharedMemoryObjectFromStruct;
 using ::mlir::triton::gpu::getTotalElemsPerThread;
-using ::mlir::triton::gpu::SharedEncodingAttr;
 
 // Contains some helper functions for both Load and Store conversions.
 struct LoadStoreSPIRVConversionBase {
@@ -18,14 +17,14 @@ struct LoadStoreSPIRVConversionBase {
       : axisAnalysisPass(axisAnalysisPass) {}
 
   unsigned getContiguity(Value ptr) const {
-    auto tensorTy = ptr.getType().dyn_cast<RankedTensorType>();
+    auto tensorTy = dyn_cast<RankedTensorType>(ptr.getType());
     if (!tensorTy)
       return 1;
-    return axisAnalysisPass.getPtrContiguity(ptr);
+    return axisAnalysisPass.getContiguity(ptr);
   }
 
   unsigned getVectorSize(Value ptr) const {
-    auto tensorTy = ptr.getType().dyn_cast<RankedTensorType>();
+    auto tensorTy = dyn_cast<RankedTensorType>(ptr.getType());
     if (!tensorTy)
       return 1;
     auto contiguity = getContiguity(ptr);
@@ -96,9 +95,9 @@ struct LoadOpSPIRVConversion
     bool otherIsSplatConstInt = false;
     DenseElementsAttr constAttr;
     int64_t splatVal = 0;
-    if (other && valueElemTy.isa<IntegerType>() &&
+    if (other && isa<IntegerType>(valueElemTy) &&
         matchPattern(other, m_Constant(&constAttr)) && constAttr.isSplat() &&
-        constAttr.getElementType().isa<IntegerType>()) {
+        isa<IntegerType>(constAttr.getElementType())) {
       otherIsSplatConstInt = true;
       splatVal = constAttr.getSplatValue<APInt>().getSExtValue();
     }
@@ -195,7 +194,7 @@ struct LoadOpSPIRVConversion
       int elemsPerWord = width / valueElemNBits;
       for (unsigned int ii = 0; ii < nWords; ++ii) {
         Value curr;
-        if (retTy.isa<mlir::VectorType>()) {
+        if (isa<mlir::VectorType>(retTy)) {
           curr = extract_val(IntegerType::get(getContext(), width), ret,
                              rewriter.getI32ArrayAttr(ii));
         } else {
@@ -281,7 +280,7 @@ struct StoreOpSPIRVConversion
     }
 
     // numElements = 1 for scalar
-    auto tensorTy = valueTy.dyn_cast<RankedTensorType>();
+    auto tensorTy = dyn_cast<RankedTensorType>(valueTy);
     auto numElems = tensorTy ? tensorTy.getNumElements() : 1;
     Value mask = getMask(valueTy, rewriter, loc);
     const size_t dtsize =
@@ -398,7 +397,7 @@ struct AtomicCASOpSPIRVConversion
     auto valElements = getTypeConverter()->unpackLLElements(
         loc, spirvVal, rewriter, op.getVal().getType());
 
-    auto TensorTy = op.getResult().getType().dyn_cast<RankedTensorType>();
+    auto TensorTy = dyn_cast<RankedTensorType>(op.getResult().getType());
     Type valueElemTy =
         TensorTy ? getTypeConverter()->convertType(TensorTy.getElementType())
                  : op.getResult().getType();
@@ -511,14 +510,14 @@ struct AtomicRMWOpSPIRVConversion
           loc, spirvMask, rewriter, op.getMask().getType());
 
     auto valueTy = op.getResult().getType();
-    auto tensorTy = valueTy.dyn_cast<RankedTensorType>();
+    auto tensorTy = dyn_cast<RankedTensorType>(valueTy);
     Type valueElemTy =
         tensorTy ? getTypeConverter()->convertType(tensorTy.getElementType())
                  : valueTy;
     auto elemsPerThread = getTotalElemsPerThread(val.getType());
     // tensor
     if (tensorTy) {
-      auto valTy = val.getType().cast<RankedTensorType>();
+      auto valTy = cast<RankedTensorType>(val.getType());
       if (valTy.getElementType().isF16()) {
         auto vec = getVectorSize(ptr);
         // We only do the fp16 atomic when it is able to be packed to 32 bits.
@@ -640,7 +639,7 @@ struct AtomicRMWOpSPIRVConversion
           loc, spirvMask, rewriter, op.getMask().getType());
 
     auto valueTy = op.getResult().getType();
-    auto tensorTy = valueTy.dyn_cast<RankedTensorType>();
+    auto tensorTy = dyn_cast<RankedTensorType>(valueTy);
     Type valueElemTy =
         tensorTy ? getTypeConverter()->convertType(tensorTy.getElementType())
                  : valueTy;
@@ -650,7 +649,7 @@ struct AtomicRMWOpSPIRVConversion
     auto vec = getVectorSize(ptr);
     int numElems = tensorTy.getNumElements();
     // tensor
-    auto valTy = val.getType().cast<RankedTensorType>();
+    auto valTy = cast<RankedTensorType>(val.getType());
     vec = std::min<unsigned>(vec, 2);
     // mask
     Value mask = getMask(valueTy, rewriter, loc);
@@ -749,6 +748,13 @@ struct AtomicRMWOpSPIRVConversion
   }
 };
 
+// InsertSliceOpSPIRVConversion removed: tensor::InsertSliceOp on shared memory
+// no longer exists in modern Triton (shared memory now uses MemDescType).
+
+// InsertSliceAsyncOpSPIRVConversion removed: triton::gpu::InsertSliceAsyncOp
+// was removed from Triton; use LocalAllocOp + LocalStoreOp instead.
+
+#if 0
 struct InsertSliceOpSPIRVConversion
     : public ConvertTritonGPUOpToSPIRVPattern<tensor::InsertSliceOp> {
   using ConvertTritonGPUOpToSPIRVPattern<
@@ -767,13 +773,13 @@ struct InsertSliceOpSPIRVConversion
     assert(funcAllocation->getBufferId(res) == Allocation::InvalidBufferId &&
            "Only support in-place insert_slice for now");
 
-    auto srcTy = src.getType().dyn_cast<RankedTensorType>();
-    auto srcLayout = srcTy.getEncoding().dyn_cast<BlockedEncodingAttr>();
+    auto srcTy = dyn_cast<RankedTensorType>(src.getType());
+    auto srcLayout = dyn_cast<BlockedEncodingAttr>(srcTy.getEncoding());
     auto srcShape = srcTy.getShape();
     assert(srcLayout && "Unexpected srcLayout in InsertSliceOpSPIRVConversion");
 
-    auto dstTy = dst.getType().dyn_cast<RankedTensorType>();
-    auto dstLayout = dstTy.getEncoding().dyn_cast<SharedEncodingAttr>();
+    auto dstTy = dyn_cast<RankedTensorType>(dst.getType());
+    auto dstLayout = dyn_cast<SharedEncodingAttr>(dstTy.getEncoding());
     auto spirvDst = adaptor.getDest();
     assert(dstLayout && "Unexpected dstLayout in InsertSliceOpSPIRVConversion");
     assert(op.hasUnitStride() &&
@@ -847,11 +853,11 @@ struct InsertSliceAsyncOpSPIRVConversion
     assert(funcAllocation->getBufferId(res) == Allocation::InvalidBufferId &&
            "Only support in-place insert_slice_async for now");
 
-    auto srcTy = src.getType().cast<RankedTensorType>();
-    auto resTy = dst.getType().cast<RankedTensorType>();
+    auto srcTy = cast<RankedTensorType>(src.getType());
+    auto resTy = cast<RankedTensorType>(dst.getType());
     auto resElemTy = getTypeConverter()->convertType(resTy.getElementType());
-    auto srcBlockedLayout = srcTy.getEncoding().cast<BlockedEncodingAttr>();
-    auto resSharedLayout = resTy.getEncoding().cast<SharedEncodingAttr>();
+    auto srcBlockedLayout = cast<BlockedEncodingAttr>(srcTy.getEncoding());
+    auto resSharedLayout = cast<SharedEncodingAttr>(resTy.getEncoding());
     auto srcShape = srcTy.getShape();
     assert(srcShape.size() == 2 &&
            "insert_slice_async: Unexpected rank of %src");
@@ -867,7 +873,7 @@ struct InsertSliceAsyncOpSPIRVConversion
         loc, spirvSrc, rewriter, src.getType());
 
     // %dst
-    auto dstTy = dst.getType().cast<RankedTensorType>();
+    auto dstTy = cast<RankedTensorType>(dst.getType());
     auto dstShape = dstTy.getShape();
     auto smemObj = getSharedMemoryObjectFromStruct(loc, spirvDst, rewriter);
     auto axis = op->getAttrOfType<IntegerAttr>("axis").getInt();
@@ -961,7 +967,7 @@ struct InsertSliceAsyncOpSPIRVConversion
         auto wordElemIdx = wordIdx * numWordElems;
         auto srcPtr = srcElems[elemIdx + wordElemIdx];
         spirv::PointerType srcPtrType =
-            srcPtr.getType().dyn_cast<spirv::PointerType>();
+            dyn_cast<spirv::PointerType>(srcPtr.getType());
         spirv::PointerType spirvSrcPtrType =
             spirv::PointerType::get(spirvElemTy, srcPtrType.getStorageClass());
         Value spirvSrcPtr =
@@ -1020,6 +1026,7 @@ struct InsertSliceAsyncOpSPIRVConversion
     return success();
   }
 };
+#endif // end disabled InsertSliceOpSPIRVConversion / InsertSliceAsyncOpSPIRVConversion
 
 void populateLoadStoreOpToSPIRVPatterns(
     TritonGPUToSPIRVTypeConverter &typeConverter, mlir::MLIRContext *context,
@@ -1035,9 +1042,6 @@ void populateLoadStoreOpToSPIRVPatterns(
                                            axisInfoAnalysis, benefit);
   patterns.add<AtomicRMWOpSPIRVConversion>(typeConverter, context, allocation,
                                            axisInfoAnalysis, benefit);
-  patterns.add<InsertSliceOpSPIRVConversion>(typeConverter, context, allocation,
-                                             indexCacheInfo, benefit);
-  patterns.add<InsertSliceAsyncOpSPIRVConversion>(typeConverter, context,
-                                                  allocation, indexCacheInfo,
-                                                  axisInfoAnalysis, benefit);
+  // InsertSliceOpSPIRVConversion and InsertSliceAsyncOpSPIRVConversion removed:
+  // these ops no longer exist in modern Triton.
 }
