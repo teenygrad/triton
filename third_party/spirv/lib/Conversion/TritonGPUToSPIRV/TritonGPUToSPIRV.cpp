@@ -6,9 +6,12 @@ using namespace mlir;
 using namespace mlir::triton;
 
 using ::mlir::spirv::getSharedMemoryObjectFromStruct;
+using ::mlir::spirv::getStridesFromShapeAndOrder;
+using ::mlir::triton::gpu::getOrder;
 using ::mlir::triton::gpu::getShapePerCTA;
 using ::mlir::triton::gpu::getTotalElemsPerThread;
-using ::mlir::triton::gpu::SharedEncodingAttr;
+using ::mlir::triton::gpu::MemDescType;
+using ::mlir::triton::gpu::SwizzledSharedEncodingAttr;
 
 struct ReturnOpSPIRVConversion
     : public ConvertTritonGPUOpToSPIRVPattern<triton::ReturnOp> {
@@ -57,8 +60,8 @@ struct BroadcastOpSPIRVConversion
     Location loc = op->getLoc();
     Value src = adaptor.getSrc();
     Value result = op.getResult();
-    auto srcTy = op.getSrc().getType().cast<RankedTensorType>();
-    auto resultTy = result.getType().cast<RankedTensorType>();
+    auto srcTy = cast<RankedTensorType>(op.getSrc().getType());
+    auto resultTy = cast<RankedTensorType>(result.getType());
     auto srcLayout = srcTy.getEncoding();
     auto resultLayout = resultTy.getEncoding();
     auto srcShape = srcTy.getShape();
@@ -66,7 +69,7 @@ struct BroadcastOpSPIRVConversion
     unsigned rank = srcTy.getRank();
 
     assert(rank == resultTy.getRank());
-    auto order = triton::gpu::getOrder(srcLayout);
+    auto order = triton::gpu::getOrder(srcTy);
     auto srcOffsets = emitOffsetForLayout(srcLayout, srcTy);
     auto resultOffsets = emitOffsetForLayout(resultLayout, resultTy);
     SmallVector<Value> srcVals =
@@ -125,8 +128,8 @@ struct AssertOpSPIRVConversion
         return failure();
       }
     }
-    spirvAssert(op, condition, adaptor.getMessage(), adaptor.getFile(),
-                adaptor.getFunc(), adaptor.getLine(), rewriter);
+    // Modern AssertOp only has message, no file/func/line
+    spirvAssert(op, condition, adaptor.getMessage(), "", "", 0, rewriter);
     rewriter.eraseOp(op);
     return success();
   }
@@ -203,7 +206,9 @@ struct AssertOpSPIRVConversion
     SmallVector<Value> operands = {msgPtr, filePtr, lineNumber, funcPtr, gid0,
                                    gid1,   gid2,    lid0,       lid1,    lid2};
 
-    auto ret = call(TypeRange(), funcName, operands);
+    // FunctionCallOp void return: use null Type (optional return_value)
+    auto ret = rewriter.create<spirv::FunctionCallOp>(
+        loc, mlir::Type{}, FlatSymbolRefAttr::get(ctx, funcName), operands);
 
     // Split a block after the call.
     Block *thenBlock = rewriter.splitBlock(ifBlock, op->getIterator());
@@ -249,7 +254,7 @@ struct AssertOpSPIRVConversion
     auto linkageTypeAttr = rewriter.getAttr<::mlir::spirv::LinkageTypeAttr>(
         spirv::LinkageType::Import);
     auto linkageAttr = rewriter.getAttr<::mlir::spirv::LinkageAttributesAttr>(
-        funcName.str(), linkageTypeAttr);
+        StringAttr::get(rewriter.getContext(), funcName), linkageTypeAttr);
     func.getOperation()->setAttr("linkage_attributes", linkageAttr);
 
     return func;
@@ -270,7 +275,7 @@ struct MakeRangeOpSPIRVConversion
   matchAndRewrite(triton::MakeRangeOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
     Location loc = op->getLoc();
-    auto rankedTy = op.getResult().getType().cast<RankedTensorType>();
+    auto rankedTy = cast<RankedTensorType>(op.getResult().getType());
     auto shape = rankedTy.getShape();
     auto layout = rankedTy.getEncoding();
 
@@ -331,10 +336,10 @@ struct GetNumProgramsOpSPIRVConversion
   matchAndRewrite(triton::GetNumProgramsOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
     Location loc = op->getLoc();
-    assert(op.getAxis() < 3);
+    assert(op.getAxisAsInt() < 3);
 
     Value blockId =
-        rewriter.create<::mlir::gpu::GridDimOp>(loc, dims[op.getAxis()]);
+        rewriter.create<::mlir::gpu::GridDimOp>(loc, dims[op.getAxisAsInt()]);
     rewriter.replaceOpWithNewOp<arith::TruncIOp>(op, i32_ty, blockId);
 
     return success();
@@ -357,7 +362,7 @@ struct AddPtrOpSPIRVConversion
     auto resultTy = op.getType();
     auto offsetTy = op.getOffset().getType();
     auto ptrTy = op.getPtr().getType();
-    auto resultTensorTy = resultTy.dyn_cast<RankedTensorType>();
+    auto resultTensorTy = dyn_cast<RankedTensorType>(resultTy);
     if (resultTensorTy) {
       unsigned elems = getTotalElemsPerThread(resultTy);
       Type elemTy =
@@ -374,7 +379,7 @@ struct AddPtrOpSPIRVConversion
                                                       resultTy);
       rewriter.replaceOp(op, view);
     } else {
-      assert(resultTy.isa<triton::PointerType>());
+      assert(isa<triton::PointerType>(resultTy));
       Type llResultTy = getTypeConverter()->convertType(resultTy);
       Value result = gep(llResultTy, adaptor.getPtr(), adaptor.getOffset());
       rewriter.replaceOp(op, result);
@@ -383,89 +388,121 @@ struct AddPtrOpSPIRVConversion
   }
 };
 
-struct AllocTensorOpSPIRVConversion
-    : public ConvertTritonGPUOpToSPIRVPattern<triton::gpu::AllocTensorOp> {
+// Handles ttg.local_alloc: allocates shared memory and returns a MemDesc.
+// The MemDesc is represented as a SPIRV struct { ptr, offsets..., strides... }.
+struct LocalAllocOpSPIRVConversion
+    : public ConvertTritonGPUOpToSPIRVPattern<triton::gpu::LocalAllocOp> {
   using ConvertTritonGPUOpToSPIRVPattern<
-      triton::gpu::AllocTensorOp>::ConvertTritonGPUOpToSPIRVPattern;
+      triton::gpu::LocalAllocOp>::ConvertTritonGPUOpToSPIRVPattern;
 
   LogicalResult
-  matchAndRewrite(triton::gpu::AllocTensorOp op, OpAdaptor adaptor,
+  matchAndRewrite(triton::gpu::LocalAllocOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
+    if (!op.isSharedMemoryAlloc())
+      return failure();
     Location loc = op->getLoc();
     Value smemBase = getSharedMemoryBase(loc, rewriter, op.getResult());
-    auto resultTy = op.getType().dyn_cast<RankedTensorType>();
+    auto memDescTy = cast<MemDescType>(op.getType());
     auto spirvElemTy =
-        getTypeConverter()->convertType(resultTy.getElementType());
+        getTypeConverter()->convertType(memDescTy.getElementType());
     auto elemPtrTy = ptr_ty(spirvElemTy, spirv::StorageClass::Workgroup);
     smemBase = bitcast(smemBase, elemPtrTy);
-    auto order = resultTy.getEncoding().cast<SharedEncodingAttr>().getOrder();
-    // Workaround for 3D tensors
-    // TODO: we need to modify the pipeline pass to give a proper shared
-    // encoding to 3D tensors
+
+    auto shapePerCTA = getShapePerCTA(memDescTy);
+    auto order = getOrder(memDescTy);
+
+    // Handle 3D tensors: add a leading stride-0 dimension for pipelining
     SmallVector<unsigned> newOrder;
-    if (resultTy.getShape().size() == 3)
+    if (shapePerCTA.size() == 3)
       newOrder = {1 + order[0], 1 + order[1], 0};
     else
       newOrder = SmallVector<unsigned>(order.begin(), order.end());
 
-    auto smemObj = SharedMemoryObject(smemBase, resultTy.getShape(), newOrder,
-                                      loc, rewriter);
+    auto smemObj =
+        SharedMemoryObject(smemBase, shapePerCTA, newOrder, loc, rewriter);
     auto retVal = getStructFromSharedMemoryObject(loc, smemObj, rewriter);
     rewriter.replaceOp(op, retVal);
     return success();
   }
 };
 
-struct ExtractSliceOpSPIRVConversion
-    : public ConvertTritonGPUOpToSPIRVPattern<triton::gpu::ExtractSliceOp> {
+// Handles ttg.local_dealloc: no-op in SPIRV (workgroup memory is static).
+struct LocalDeallocOpSPIRVConversion
+    : public ConvertTritonGPUOpToSPIRVPattern<triton::gpu::LocalDeallocOp> {
   using ConvertTritonGPUOpToSPIRVPattern<
-      triton::gpu::ExtractSliceOp>::ConvertTritonGPUOpToSPIRVPattern;
+      triton::gpu::LocalDeallocOp>::ConvertTritonGPUOpToSPIRVPattern;
 
   LogicalResult
-  matchAndRewrite(triton::gpu::ExtractSliceOp op, OpAdaptor adaptor,
+  matchAndRewrite(triton::gpu::LocalDeallocOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-    // %dst = extract_slice %src[%offsets]
+    rewriter.eraseOp(op);
+    return success();
+  }
+};
+
+// Handles ttg.local_store: stores a distributed tensor to shared memory.
+struct LocalStoreOpSPIRVConversion
+    : public ConvertTritonGPUOpToSPIRVPattern<triton::gpu::LocalStoreOp> {
+  using ConvertTritonGPUOpToSPIRVPattern<
+      triton::gpu::LocalStoreOp>::ConvertTritonGPUOpToSPIRVPattern;
+
+  LogicalResult
+  matchAndRewrite(triton::gpu::LocalStoreOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
     Location loc = op->getLoc();
-    auto srcTy = op.getSource().getType().dyn_cast<RankedTensorType>();
-    auto srcLayout = srcTy.getEncoding().dyn_cast<SharedEncodingAttr>();
-    assert(srcLayout && "Unexpected resultLayout in ExtractSliceOpConversion");
-    assert(op.hasUnitStride() &&
-           "Only unit stride supported by ExtractSliceOpConversion");
+    auto srcTy = cast<RankedTensorType>(op.getSrc().getType());
+    auto dstTy = cast<MemDescType>(op.getDst().getType());
+    auto srcLayout = srcTy.getEncoding();
+    assert(mlir::isa<triton::gpu::BlockedEncodingAttr>(srcLayout) &&
+           "LocalStoreOp expects blocked src layout");
 
-    // newBase = base + offset
-    // Triton supports either static and dynamic offsets
     auto smemObj =
-        getSharedMemoryObjectFromStruct(loc, adaptor.getSource(), rewriter);
-    SmallVector<Value, 4> opOffsetVals;
-    SmallVector<Value, 4> offsetVals;
-    auto mixedOffsets = op.getMixedOffsets();
-    for (auto i = 0; i < mixedOffsets.size(); ++i) {
-      if (op.isDynamicOffset(i))
-        opOffsetVals.emplace_back(adaptor.getOffsets()[i]);
-      else
-        opOffsetVals.emplace_back(i32_val(op.getStaticOffset(i)));
-      offsetVals.emplace_back(add(smemObj.offsets[i], opOffsetVals[i]));
-    }
-    // Compute the offset based on the original strides of the shared memory
-    // object
-    auto offset = dot(rewriter, loc, opOffsetVals, smemObj.strides);
-    // newShape = rank_reduce(shape)
-    // Triton only supports static tensor sizes
-    SmallVector<Value, 4> strideVals;
-    for (auto i = 0; i < op.getStaticSizes().size(); ++i) {
-      if (op.getStaticSize(i) == 1) {
-        offsetVals.erase(offsetVals.begin() + i);
-      } else {
-        strideVals.emplace_back(smemObj.strides[i]);
-      }
-    }
+        getSharedMemoryObjectFromStruct(loc, adaptor.getDst(), rewriter);
+    auto elemTy = getTypeConverter()->convertType(srcTy.getElementType());
+    auto shapePerCTA = getShapePerCTA(dstTy);
 
-    auto spirvElemTy = getTypeConverter()->convertType(srcTy.getElementType());
-    auto elemPtrTy = ptr_ty(spirvElemTy, spirv::StorageClass::Workgroup);
-    smemObj = SharedMemoryObject(gep(elemPtrTy, smemObj.base, offset),
-                                 strideVals, offsetVals);
-    auto retVal = getStructFromSharedMemoryObject(loc, smemObj, rewriter);
-    rewriter.replaceOp(op, retVal);
+    auto inOrd = getOrder(srcTy);
+    auto outOrd = getOrder(dstTy);
+    auto dstStrides =
+        getStridesFromShapeAndOrder(shapePerCTA, outOrd, loc, rewriter);
+    auto srcIndices = emitIndices(loc, rewriter, srcLayout, srcTy, false);
+    storeDistributedToShared(op.getSrc(), adaptor.getSrc(), dstStrides,
+                             srcIndices, op.getDst(), smemObj.base, elemTy,
+                             loc, rewriter);
+    rewriter.eraseOp(op);
+    return success();
+  }
+};
+
+// Handles ttg.local_load: loads from shared memory into a distributed tensor.
+struct LocalLoadOpSPIRVConversion
+    : public ConvertTritonGPUOpToSPIRVPattern<triton::gpu::LocalLoadOp> {
+  using ConvertTritonGPUOpToSPIRVPattern<
+      triton::gpu::LocalLoadOp>::ConvertTritonGPUOpToSPIRVPattern;
+
+  LogicalResult
+  matchAndRewrite(triton::gpu::LocalLoadOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    Location loc = op->getLoc();
+    auto srcTy = cast<MemDescType>(op.getSrc().getType());
+    auto dstTy = cast<RankedTensorType>(op.getType());
+    auto dstLayout = dstTy.getEncoding();
+
+    auto smemObj =
+        getSharedMemoryObjectFromStruct(loc, adaptor.getSrc(), rewriter);
+    auto elemTy = getTypeConverter()->convertType(dstTy.getElementType());
+
+    auto inOrd = getOrder(srcTy);
+    auto srcStrides =
+        getStridesFromShapeAndOrder(getShapePerCTA(srcTy), inOrd, loc, rewriter);
+    auto dstIndices = emitIndices(loc, rewriter, dstLayout, dstTy);
+
+    SmallVector<Value> outVals =
+        loadSharedToDistributed(op.getResult(), dstIndices, op.getSrc(),
+                                smemObj, elemTy, loc, rewriter);
+    Value result =
+        getTypeConverter()->packLLElements(loc, outVals, rewriter, dstTy);
+    rewriter.replaceOp(op, result);
     return success();
   }
 };
@@ -523,19 +560,21 @@ void populateTritonGPUToSPIRVPatterns(
     ConvertTritonGPUOpToSPIRVPatternBase::IndexCacheInfo &indexCacheInfo,
     PatternBenefit benefit) {
   patterns.add<AddPtrOpSPIRVConversion>(typeConverter, context, benefit);
-  patterns.add<AllocTensorOpSPIRVConversion>(typeConverter, context, allocation,
-                                             benefit);
   patterns.add<AsyncCommitGroupOpSPIRVConversion>(typeConverter, context,
                                                   benefit);
   patterns.add<AsyncWaitOpSPIRVConversion>(typeConverter, context, benefit);
   patterns.add<BroadcastOpSPIRVConversion>(typeConverter, context, benefit);
-
-  patterns.add<ExtractSliceOpSPIRVConversion>(typeConverter, context,
-                                              allocation, benefit);
   patterns.add<GetProgramIdOpToSPIRVConversion>(typeConverter, context,
                                                 benefit);
   patterns.add<GetNumProgramsOpSPIRVConversion>(typeConverter, context,
                                                 benefit);
+  patterns.add<LocalAllocOpSPIRVConversion>(typeConverter, context, allocation,
+                                            benefit);
+  patterns.add<LocalDeallocOpSPIRVConversion>(typeConverter, context, benefit);
+  patterns.add<LocalLoadOpSPIRVConversion>(typeConverter, context, allocation,
+                                           benefit);
+  patterns.add<LocalStoreOpSPIRVConversion>(typeConverter, context, allocation,
+                                            benefit);
   patterns.add<MakeRangeOpSPIRVConversion>(typeConverter, context,
                                            indexCacheInfo, benefit);
   patterns.add<ReturnOpSPIRVConversion>(typeConverter, context, benefit);

@@ -322,9 +322,9 @@ ScanOpConversion::getMultiDimLaneId(ConversionPatternRewriter &rewriter,
   unsigned axis = helper.getAxis();
   auto srcEncoding = helper.getEncoding();
 
-  auto threadsPerWarp = triton::gpu::getThreadsPerWarp(srcEncoding);
-  auto warpsPerCTA = triton::gpu::getWarpsPerCTA(srcEncoding);
-  auto order = triton::gpu::getOrder(srcEncoding);
+  auto threadsPerWarp = srcEncoding.getThreadsPerWarp();
+  auto warpsPerCTA = srcEncoding.getWarpsPerCTA();
+  auto order = srcEncoding.getOrder();
   return delinearize(rewriter, loc, laneId, threadsPerWarp, order);
 }
 
@@ -336,9 +336,9 @@ ScanOpConversion::getMultiDimWarpId(ConversionPatternRewriter &rewriter,
   unsigned axis = helper.getAxis();
   auto srcEncoding = helper.getEncoding();
 
-  auto threadsPerWarp = triton::gpu::getThreadsPerWarp(srcEncoding);
-  auto warpsPerCTA = triton::gpu::getWarpsPerCTA(srcEncoding);
-  auto order = triton::gpu::getOrder(srcEncoding);
+  auto threadsPerWarp = srcEncoding.getThreadsPerWarp();
+  auto warpsPerCTA = srcEncoding.getWarpsPerCTA();
+  auto order = srcEncoding.getOrder();
   return delinearize(rewriter, loc, warpId, warpsPerCTA, order);
 }
 
@@ -352,9 +352,9 @@ ScanOpConversion::getDelinearizedIds(ConversionPatternRewriter &rewriter,
   unsigned axis = helper.getAxis();
   auto srcEncoding = helper.getEncoding();
 
-  auto threadsPerWarp = triton::gpu::getThreadsPerWarp(srcEncoding);
-  auto warpsPerCTA = triton::gpu::getWarpsPerCTA(srcEncoding);
-  auto order = triton::gpu::getOrder(srcEncoding);
+  auto threadsPerWarp = srcEncoding.getThreadsPerWarp();
+  auto warpsPerCTA = srcEncoding.getWarpsPerCTA();
+  auto order = srcEncoding.getOrder();
   SmallVector<Value> multiDimLaneId =
       delinearize(rewriter, loc, laneId, threadsPerWarp, order);
   SmallVector<Value> multiDimWarpId =
@@ -396,9 +396,8 @@ ScanOpConversion::emitFastScan(triton::ScanOp op, triton::ScanOpAdaptor adaptor,
   auto [laneIdAxis, warpIdAxis, flatIdParallel] =
       getDelinearizedIds(rewriter, helper, laneId, warpId);
   auto input = adaptor.getOperands()[0];
-  auto type = op.getOperand(0).getType().cast<RankedTensorType>();
+  auto type = cast<RankedTensorType>(op.getOperand(0).getType());
   auto axisNumWarps = helper.getAxisNumWarpsWithUniqueData();
-  auto axisNumThreads = helper.getAxisNumThreadsPerWarp();
   warpIdAxis = urem(warpIdAxis, i32_val(axisNumWarps));
   SmallVector<Value> srcValues =
       getTypeConverter()->unpackLLElements(loc, input, rewriter, type);
@@ -431,9 +430,9 @@ ScanOpConversion::emitFastScan(triton::ScanOp op, triton::ScanOpAdaptor adaptor,
     unsigned scanDim = helper.getAxisNumThreadsPerWarpWithUniqueData();
     auto multiDimLaneId = getMultiDimLaneId(rewriter, helper, laneId);
     multiDimLaneId[helper.getAxis()] = i32_val(scanDim - 1);
-    auto threadsPerWarp = triton::gpu::getThreadsPerWarp(helper.getEncoding());
+    auto threadsPerWarp = helper.getEncoding().getThreadsPerWarp();
     auto laneIdLast = linearize(rewriter, loc, multiDimLaneId, threadsPerWarp,
-                                triton::gpu::getOrder(helper.getEncoding()));
+                                helper.getEncoding().getOrder());
     AddPartialReduceOneWarp(srcValues, rewriter, helper, warpIdAxis, laneIdAxis,
                             laneIdLast);
   } // else axisNumWarps == 1 and srcValues.size() == 1, nothing to do.

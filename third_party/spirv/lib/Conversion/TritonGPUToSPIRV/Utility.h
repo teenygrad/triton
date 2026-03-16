@@ -152,6 +152,16 @@
 namespace mlir {
 namespace triton {
 
+// Reorder elements of data according to order: result[i] = data[order[i]]
+template <typename T>
+llvm::SmallVector<T> reorder(llvm::ArrayRef<T> data,
+                              llvm::ArrayRef<unsigned> order) {
+  llvm::SmallVector<T> result(data.size());
+  for (unsigned i = 0; i < data.size(); ++i)
+    result[i] = data[order[i]];
+  return result;
+}
+
 // Delinearize supposing order is [0, 1, .. , n]
 template <typename T>
 llvm::SmallVector<T> getMultiDimIndexImpl(T linearIndex,

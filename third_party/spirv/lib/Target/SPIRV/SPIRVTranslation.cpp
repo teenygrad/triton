@@ -10,11 +10,12 @@
 #include "mlir/Target/LLVMIR/LLVMTranslationInterface.h"
 #include "mlir/Target/SPIRV/Serialization.h"
 #include "mlir/Transforms/Passes.h"
-#include "triton/Conversion/TritonGPUToLLVM/TritonGPUToLLVMPass.h"
-#include "triton/Conversion/TritonGPUToSPIRV/TritonGPUToSPIRVPass.h"
+#include "triton/Conversion/TritonGPUToLLVM/Passes.h"
+#include "Conversion/TritonGPUToSPIRV/TritonGPUToSPIRVPass.h"
 #include "triton/Tools/Sys/GetEnv.hpp"
 
-#include "SPIRV-Tools/tools/io.h"
+// SPIRV-Tools/tools/io.h is an internal header not available from system
+// package installs. ReadBinaryFile is reimplemented inline below.
 #include "spirv-tools/libspirv.hpp"
 #include "spirv-tools/linker.hpp"
 #include "spirv-tools/optimizer.hpp"
@@ -22,8 +23,25 @@
 
 #include <dlfcn.h>
 #include <filesystem>
+#include <fstream>
 
-#include "triton/Target/SPIRV/SPIRVTranslation.h"
+#include "Target/SPIRV/SPIRVTranslation.h"
+
+// Replacement for SPIRV-Tools internal ReadBinaryFile<uint32_t>.
+template <typename T>
+static bool ReadBinaryFile(const char *path, std::vector<T> *data) {
+  static_assert(sizeof(T) == 4, "ReadBinaryFile only supports 32-bit elements");
+  std::ifstream file(path, std::ios::binary | std::ios::ate);
+  if (!file.is_open())
+    return false;
+  std::streamsize size = file.tellg();
+  if (size < 0 || size % sizeof(T) != 0)
+    return false;
+  file.seekg(0, std::ios::beg);
+  data->resize(size / sizeof(T));
+  file.read(reinterpret_cast<char *>(data->data()), size);
+  return file.good();
+}
 
 namespace mlir {
 namespace triton {
@@ -90,7 +108,7 @@ getInterfaceVariables(spirv::FuncOp funcOp,
     // Starting with version 1.4, the interface’s storage classes are all
     // storage classes used in declaring all global variables referenced by the
     // entry point’s call tree." We should consider the target environment here.
-    switch (var.getType().cast<spirv::PointerType>().getStorageClass()) {
+    switch (cast<spirv::PointerType>(var.getType()).getStorageClass()) {
     case spirv::StorageClass::Input:
     case spirv::StorageClass::Output:
       interfaceVarSet.insert(var.getOperation());
@@ -201,9 +219,9 @@ getExternLibs(spirv::ModuleOp module) {
   for (auto &func : funcs) {
     if (func.getOperation()->hasAttr("libname")) {
       auto name =
-          func.getOperation()->getAttr("libname").dyn_cast<StringAttr>();
+          dyn_cast<StringAttr>(func.getOperation()->getAttr("libname"));
       auto path =
-          func.getOperation()->getAttr("libpath").dyn_cast<StringAttr>();
+          dyn_cast<StringAttr>(func.getOperation()->getAttr("libpath"));
       if (name) {
         std::string libName = name.str();
         // Note: skip the libdevice path. Use the Intel IMF lib.
@@ -214,15 +232,14 @@ getExternLibs(spirv::ModuleOp module) {
   }
 
   if (module.getOperation()->hasAttr("triton_gpu.externs")) {
-    auto dict = module.getOperation()
-                    ->getAttr("triton_gpu.externs")
-                    .dyn_cast<DictionaryAttr>();
+    auto dict = dyn_cast<DictionaryAttr>(module.getOperation()
+                    ->getAttr("triton_gpu.externs"));
     for (auto &attr : dict) {
       auto libName = attr.getName().strref().trim().str();
       // Note: skip the libdevice path. Use the Intel IMF lib.
       if (libName.compare("libdevice") != 0) {
         externLibs[libName] =
-            attr.getValue().dyn_cast<StringAttr>().strref().trim().str();
+            dyn_cast<StringAttr>(attr.getValue()).strref().trim().str();
       }
     }
   }
@@ -232,7 +249,7 @@ getExternLibs(spirv::ModuleOp module) {
                                           "libsycl-fallback-imf-fp64.spv",
                                           "libsycl-fallback-cassert.spv"};
     // first search for environmental path
-    std::string env_path = ::triton::tools::getenv("TRITON_LIBDEVICE_PATH");
+    std::string env_path = ::mlir::triton::tools::getStrEnv("TRITON_LIBDEVICE_PATH");
     if (!env_path.empty()) {
       for (auto &lib_name : lib_names) {
         externLibs.try_emplace(lib_name, env_path + "/" + lib_name);
@@ -313,7 +330,7 @@ static LogicalResult translateTritonSPIRVToSPIRVIR(ModuleOp module,
 
     // Set the spirv module attributes
     newModuleOp->setAttr(
-        triton::gpu::TritonGPUDialect::getThreadsPerWarpAttrName(),
+        triton::gpu::AttrNumThreadsPerWarp,
         IntegerAttr::get(mlir::IntegerType::get(builder.getContext(), 32),
                          llvm::APInt(32, threadsPerWarp)));
 
@@ -360,8 +377,8 @@ static LogicalResult translateTritonSPIRVToSPIRVIR(ModuleOp module,
     return module.emitError("found more than one 'spv.module' op");
 
   for (auto &sprivModule : spirvModules) {
-    int threadsPerWarp = sprivModule->getAttr("triton_gpu.threads-per-warp")
-                             .cast<IntegerAttr>()
+    int threadsPerWarp = cast<IntegerAttr>(
+                             sprivModule->getAttr("triton_gpu.threads-per-warp"))
                              .getInt();
     sprivModule.walk([&](spirv::FuncOp op) {
       auto entryPointAttrName = spirv::getEntryPointABIAttrName();
@@ -434,16 +451,16 @@ std::string translateTritonGPUToSPIRVIR(
   printingFlags.elideLargeElementsAttrs(16);
   pm.enableIRPrinting(
       /*shouldPrintBeforePass=*/
-      nullptr,
+      [](mlir::Pass *, mlir::Operation *) { return false; },
       /*shouldPrintAfterPass=*/
       [](mlir::Pass *pass, mlir::Operation *) {
-        return ::triton::tools::getBoolEnv("MLIR_ENABLE_DUMP");
+        return ::mlir::triton::tools::getBoolEnv("MLIR_ENABLE_DUMP");
       },
       /*printModuleScope=*/false,
       /*printAfterOnlyOnChange=*/true,
       /*printAfterOnlyOnFailure*/ false, llvm::dbgs(), printingFlags);
 
-  pm.addPass(mlir::createConvertSCFToCFPass());
+  pm.addPass(mlir::createSCFToControlFlowPass());
   pm.addPass(createConvertTritonGPUToSPIRVPass(computeCapability));
   //  pm.addPass(mlir::arith::createConvertArithToSPIRVPass());
   // Canonicalize to eliminate the remaining UnrealizedConversionCastOp

@@ -10,7 +10,7 @@ using namespace mlir::triton;
 void populateViewOpToSPIRVPatterns(
     TritonGPUToSPIRVTypeConverter &typeConverter, mlir::MLIRContext *context,
     mlir::RewritePatternSet &patterns, int numWarps,
-    mlir::ModuleAxisInfoAnalysis &axisInfoAnalysis,
+    mlir::triton::ModuleAxisInfoAnalysis &axisInfoAnalysis,
     mlir::ModuleAllocation *allocation, mlir::Value smem,
     mlir::PatternBenefit benefit, bool supportBFConvOp);
 

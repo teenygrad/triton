@@ -1,4 +1,4 @@
-#include "triton/Conversion/TritonGPUToSPIRV/TritonGPUToSPIRVPass.h"
+#include "Conversion/TritonGPUToSPIRV/TritonGPUToSPIRVPass.h"
 
 #include "mlir/Analysis/DataFlowFramework.h"
 #include "mlir/Conversion/ArithToSPIRV/ArithToSPIRV.h"
@@ -35,7 +35,7 @@ using namespace mlir;
 using namespace mlir::triton;
 
 #define GEN_PASS_CLASSES
-#include "triton/Conversion/TritonGPUToSPIRV/Passes.h.inc"
+#include "Conversion/TritonGPUToSPIRV/Passes.h.inc"
 
 namespace {
 
@@ -44,10 +44,9 @@ using ::mlir::triton::gpu::DotOperandEncodingAttr;
 using ::mlir::triton::gpu::getElemsPerThread;
 using ::mlir::triton::gpu::getOrder;
 using ::mlir::triton::gpu::getShapePerCTA;
-using ::mlir::triton::gpu::getSizePerThread;
 using ::mlir::triton::gpu::NvidiaMmaEncodingAttr;
-using ::mlir::triton::gpu::SharedEncodingAttr;
 using ::mlir::triton::gpu::SliceEncodingAttr;
+using ::mlir::triton::gpu::SwizzledSharedEncodingAttr;
 
 class TritonSPIRVFunctionConversionTarget : public ConversionTarget {
 public:
@@ -192,7 +191,7 @@ struct FuncOpConversion : public FuncOpConversionBase {
       //    numWarps));
       newFuncOp->setAttr(
           spirv::getEntryPointABIAttrName(),
-          spirv::EntryPointABIAttr::get(getContext(), nullptr, std::nullopt));
+          spirv::EntryPointABIAttr::get(getContext(), DenseI32ArrayAttr{}, std::nullopt, std::nullopt));
     } else {
       // The noinline function control will be used by the SPIRV codegen to
       // prevent inlining.
@@ -396,14 +395,13 @@ public:
                                                    spirvTypeConverter);
     TritonSPIRVConversionTarget spirvTarget(*context, spirvTypeConverter);
 
-    int numWarps = triton::gpu::TritonGPUDialect::getNumWarps(mod);
+    int numWarps = mod->getAttrOfType<IntegerAttr>(triton::gpu::AttrNumWarpsName).getInt();
     int numCTAs = triton::gpu::TritonGPUDialect::getNumCTAs(mod);
     int threadsPerWarp = triton::gpu::TritonGPUDialect::getThreadsPerWarp(mod);
 
     // Preprocess
     decomposeMmaToDotOperand(mod, numWarps, threadsPerWarp, numCTAs);
     decomposeBlockedToDotOperand(mod);
-    decomposeInsertSliceAsyncOp(mod);
 
     // Allocate shared memory and set barrier
     ModuleAllocation allocation(mod);
@@ -547,18 +545,19 @@ private:
     // unless certain conditions are met
     mod.walk([&](triton::gpu::ConvertLayoutOp cvtOp) -> void {
       OpBuilder builder(cvtOp);
-      auto srcType = cvtOp.getOperand().getType().cast<RankedTensorType>();
-      auto dstType = cvtOp.getType().cast<RankedTensorType>();
+      auto srcType = cast<RankedTensorType>(cvtOp.getOperand().getType());
+      auto dstType = cast<RankedTensorType>(cvtOp.getType());
       auto srcMma =
-          srcType.getEncoding().dyn_cast<triton::gpu::NvidiaMmaEncodingAttr>();
+          dyn_cast<triton::gpu::NvidiaMmaEncodingAttr>(srcType.getEncoding());
       auto dstDotOp =
-          dstType.getEncoding().dyn_cast<triton::gpu::DotOperandEncodingAttr>();
-      if (srcMma && dstDotOp && !isMmaToDotShortcut(srcType, dstType)) {
+          dyn_cast<triton::gpu::DotOperandEncodingAttr>(dstType.getEncoding());
+      if (srcMma && dstDotOp) {
         auto tmpType = RankedTensorType::get(
             dstType.getShape(), dstType.getElementType(),
             triton::gpu::BlockedEncodingAttr::get(
-                mod.getContext(), srcType.getShape(), getSizePerThread(srcMma),
-                getOrder(srcMma), numWarps, threadsPerWarp, numCTAs));
+                mod.getContext(), srcType.getShape(), triton::gpu::getContigPerThread(srcType),
+                getOrder(srcMma, srcType.getShape()), numWarps, threadsPerWarp,
+                numCTAs));
         auto tmp = builder.create<triton::gpu::ConvertLayoutOp>(
             cvtOp.getLoc(), tmpType, cvtOp.getOperand());
         auto newConvert = builder.create<triton::gpu::ConvertLayoutOp>(
@@ -574,16 +573,16 @@ private:
     // because the codegen doesn't handle `blocked -> dot_op` directly
     mod.walk([&](triton::gpu::ConvertLayoutOp cvtOp) -> void {
       OpBuilder builder(cvtOp);
-      auto srcType = cvtOp.getOperand().getType().cast<RankedTensorType>();
-      auto dstType = cvtOp.getType().cast<RankedTensorType>();
+      auto srcType = cast<RankedTensorType>(cvtOp.getOperand().getType());
+      auto dstType = cast<RankedTensorType>(cvtOp.getType());
       auto srcBlocked =
-          srcType.getEncoding().dyn_cast<triton::gpu::BlockedEncodingAttr>();
+          dyn_cast<triton::gpu::BlockedEncodingAttr>(srcType.getEncoding());
       auto dstDotOp =
-          dstType.getEncoding().dyn_cast<triton::gpu::DotOperandEncodingAttr>();
+          dyn_cast<triton::gpu::DotOperandEncodingAttr>(dstType.getEncoding());
       if (srcBlocked && dstDotOp) {
         auto tmpType = RankedTensorType::get(
             dstType.getShape(), dstType.getElementType(),
-            triton::gpu::SharedEncodingAttr::get(
+            triton::gpu::SwizzledSharedEncodingAttr::get(
                 mod.getContext(), dstDotOp, srcType.getShape(),
                 srcBlocked.getOrder(), srcBlocked.getCTALayout(),
                 srcType.getElementType()));
@@ -597,109 +596,6 @@ private:
     });
   }
 
-  void decomposeInsertSliceAsyncOp(ModuleOp mod) const {
-    ModuleAxisInfoAnalysis axisInfoAnalysis(mod);
-    // TODO(Keren): This is a hacky knob that may cause performance regression
-    // when decomposition has been performed. We should remove this knob once we
-    // have thorough analysis on async wait. Currently, we decompose
-    // `insert_slice_async` into `load` and `insert_slice` without knowing which
-    // `async_wait` is responsible for the `insert_slice_async`. To guarantee
-    // correctness, we blindly set the `async_wait` to wait for all async ops.
-    //
-    // There are two options to improve this:
-    // 1. We can perform a dataflow analysis to find the `async_wait` that is
-    // responsible for the `insert_slice_async` in the backend.
-    // 2. We can modify the pipeline to perform the decomposition before the
-    // `async_wait` is inserted. However, it is also risky because we don't know
-    // the correct vectorized shape yet in the pipeline pass. Making the
-    // pipeline pass aware of the vectorization could introduce additional
-    // dependencies on the AxisInfoAnalysis and the Coalesce analysis.
-    bool decomposed = false;
-    // insert_slice_async %src, %dst, %idx, %mask, %other
-    // =>
-    // %tmp = load %src, %mask, %other
-    // %res = insert_slice %tmp into %dst[%idx]
-    mod.walk([&](triton::gpu::InsertSliceAsyncOp insertSliceAsyncOp) -> void {
-      OpBuilder builder(insertSliceAsyncOp);
-
-      // Get the vectorized load size
-      auto src = insertSliceAsyncOp.getSrc();
-      auto dst = insertSliceAsyncOp.getDst();
-      auto mask = insertSliceAsyncOp.getMask();
-      auto srcTy = src.getType().cast<RankedTensorType>();
-      auto dstTy = dst.getType().cast<RankedTensorType>();
-      auto srcBlocked =
-          srcTy.getEncoding().dyn_cast<triton::gpu::BlockedEncodingAttr>();
-      auto resSharedLayout =
-          dstTy.getEncoding().dyn_cast<triton::gpu::SharedEncodingAttr>();
-      auto resElemTy = dstTy.getElementType();
-      unsigned inVec = axisInfoAnalysis.getPtrContiguity(src);
-      if (mask)
-        inVec =
-            std::min<unsigned>(axisInfoAnalysis.getMaskAlignment(mask), inVec);
-      unsigned outVec = resSharedLayout.getVec();
-      unsigned minVec = std::min(outVec, inVec);
-      auto maxBitWidth =
-          std::max<unsigned>(128, resElemTy.getIntOrFloatBitWidth());
-      auto vecBitWidth = resElemTy.getIntOrFloatBitWidth() * minVec;
-      auto bitWidth = std::min<unsigned>(maxBitWidth, vecBitWidth);
-      auto byteWidth = bitWidth / 8;
-
-      // If the load byte width is not eligible or the current compute
-      // capability does not support async copy, then we do decompose
-      if (triton::gpu::InsertSliceAsyncOp::getEligibleLoadByteWidth(80)
-              .contains(byteWidth))
-        return;
-
-      // load
-      auto tmpTy =
-          RankedTensorType::get(srcTy.getShape(), resElemTy, srcBlocked);
-      auto loadOp = builder.create<triton::LoadOp>(
-          insertSliceAsyncOp.getLoc(), tmpTy, insertSliceAsyncOp.getSrc(),
-          insertSliceAsyncOp.getMask(), insertSliceAsyncOp.getOther(),
-          // TODO(Chenggang): confirm `boundaryCheck` and `padding`
-          /*boundaryCheck=*/nullptr, /*padding=*/nullptr,
-          insertSliceAsyncOp.getCache(), insertSliceAsyncOp.getEvict(),
-          insertSliceAsyncOp.getIsVolatile());
-
-      // insert_slice
-      auto axis = insertSliceAsyncOp.getAxis();
-      auto intAttr = [&](int64_t v) { return builder.getI64IntegerAttr(v); };
-      auto offsets = SmallVector<OpFoldResult>(dstTy.getRank(), intAttr(0));
-      auto sizes = SmallVector<OpFoldResult>(dstTy.getRank(), intAttr(1));
-      auto strides = SmallVector<OpFoldResult>(dstTy.getRank(), intAttr(1));
-      offsets[axis] = insertSliceAsyncOp.getIndex();
-      for (size_t i = 0; i < dstTy.getRank(); i++) {
-        if (i != axis)
-          sizes[i] = intAttr(dstTy.getShape()[i]);
-      }
-      auto insertSliceOp = builder.create<tensor::InsertSliceOp>(
-          insertSliceAsyncOp.getLoc(), loadOp, insertSliceAsyncOp.getDst(),
-          offsets, sizes, strides);
-
-      // Replace
-      insertSliceAsyncOp.replaceAllUsesWith(insertSliceOp.getResult());
-      insertSliceAsyncOp.erase();
-      decomposed = true;
-    });
-
-    mod.walk([&](triton::gpu::AsyncCommitGroupOp asyncCommitGroupOp) -> void {
-      if (!triton::gpu::AsyncCommitGroupOp::isSupported(80))
-        asyncCommitGroupOp.erase();
-    });
-
-    mod.walk([&](triton::gpu::AsyncWaitOp asyncWaitOp) -> void {
-      if (!triton::gpu::AsyncWaitOp::isSupported(80)) {
-        // async wait is supported in Ampere and later
-        asyncWaitOp.erase();
-      } else if (decomposed) {
-        // Wait for all previous async ops
-        OpBuilder builder(asyncWaitOp);
-        builder.create<triton::gpu::AsyncWaitOp>(asyncWaitOp.getLoc(), 0);
-        asyncWaitOp.erase();
-      }
-    });
-  }
 };
 
 } // anonymous namespace

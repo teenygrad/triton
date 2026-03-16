@@ -4,6 +4,7 @@
 #include "mlir/Dialect/SPIRV/IR/SPIRVDialect.h"
 #include "mlir/Dialect/SPIRV/Transforms/SPIRVConversion.h"
 #include "triton/Conversion/MLIRTypes.h"
+#include "triton/Dialect/TritonGPU/IR/Dialect.h"
 
 using namespace mlir;
 using namespace mlir::triton;
@@ -26,6 +27,7 @@ public:
                                       Type type);
 
   Type convertTritonTensorType(RankedTensorType type);
+  Type convertMemDescType(triton::gpu::MemDescType type);
 };
 
 #endif

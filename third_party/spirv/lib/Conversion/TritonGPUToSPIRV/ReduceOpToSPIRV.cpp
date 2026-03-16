@@ -21,7 +21,7 @@ public:
   matchAndRewrite(triton::ReduceOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
     ReduceOpHelper helper(op);
-    assert(helper.isSupportedLayout() &&
+    assert(helper.isReduceWithinCTA() &&
            "Unexpected srcLayout in ReduceOpConversion");
     Location loc = op->getLoc();
 
@@ -42,7 +42,7 @@ public:
     }
 
     // Compute a shared memory base per operand.
-    auto smemShape = helper.getScratchConfig();
+    auto smemShape = helper.getScratchRepShape();
 
     SmallVector<Value> smemBases =
         getSmemBases(helper, op, smemShape, rewriter);
@@ -227,8 +227,8 @@ private:
     SmallVector<Value> results(op.getNumOperands());
     for (unsigned i = 0; i < op.getNumOperands(); ++i) {
       if (auto resultTy =
-              op.getResult()[i].getType().dyn_cast<RankedTensorType>()) {
-        auto resultLayout = resultTy.getEncoding().cast<SliceEncodingAttr>();
+              dyn_cast<RankedTensorType>(op.getResult()[i].getType())) {
+        auto resultLayout = cast<SliceEncodingAttr>(resultTy.getEncoding());
         unsigned resultElems = getTotalElemsPerThread(resultTy);
         SmallVector<SmallVector<unsigned>> resultOffset =
             emitOffsetForLayout(resultLayout, resultTy);
@@ -258,22 +258,25 @@ private:
                     ConversionPatternRewriter &rewriter) const {
     auto srcLayout = helper.getSrcLayout();
     auto srcShape = helper.getSrcShape();
-    auto order = getOrder(srcLayout);
+    auto order = getOrder(cast<triton::gpu::DistributedEncodingTrait>(srcLayout),
+                          srcShape);
     SmallVector<Value> multiDimWarpId;
 
     // 2x2 warps with slice dim = 0, warpId = 2 ends up writing at the same
     // address as warpId = 0 since the warpsPerCTA is [1, 2], need to figure out
     // a way to properly delinearize warpId in the slice case
-    if (auto sliceLayout = srcLayout.dyn_cast<SliceEncodingAttr>()) {
+    if (auto sliceLayout = dyn_cast<SliceEncodingAttr>(srcLayout)) {
       auto parentLayout = sliceLayout.getParent();
-      auto parentWarpsPerCTA = triton::gpu::getWarpsPerCTA(parentLayout);
-      auto parentOrder = triton::gpu::getOrder(parentLayout);
+      auto parentShape = sliceLayout.paddedShape(srcShape);
+      auto parentWarpsPerCTA = triton::gpu::getWarpsPerCTA(parentLayout, parentShape);
+      auto parentOrder = triton::gpu::getOrder(
+          cast<triton::gpu::DistributedEncodingTrait>(parentLayout), parentShape);
       multiDimWarpId =
           delinearize(rewriter, loc, warpId, parentWarpsPerCTA, parentOrder);
       multiDimWarpId.erase(multiDimWarpId.begin() + sliceLayout.getDim());
     } else {
       auto warpsPerCTA =
-          triton::gpu::getWarpsPerCTAWithUniqueData(srcLayout, srcShape);
+          triton::gpu::getWarpsPerCTA(srcLayout, srcShape);
       multiDimWarpId = delinearize(rewriter, loc, warpId, warpsPerCTA, order);
     }
     return multiDimWarpId;
@@ -291,18 +294,19 @@ private:
     auto srcLayout = helper.getSrcLayout();
     auto srcShape = helper.getSrcShape();
     unsigned axis = op.getAxis();
-    auto smemShape = helper.getScratchConfig();
+    auto smemShape = helper.getScratchRepShape();
 
     auto threadsPerWarp =
-        triton::gpu::getThreadsPerWarpWithUniqueData(srcLayout, srcShape);
-    auto order = getOrder(srcLayout);
+        triton::gpu::getThreadsPerWarp(srcLayout, srcShape);
+    auto laneOrder = getOrder(cast<triton::gpu::DistributedEncodingTrait>(srcLayout),
+                          srcShape);
     auto mod = op.getOperation()->getParentOfType<ModuleOp>();
     Value warpSize =
         i32_val(triton::gpu::TritonGPUDialect::getThreadsPerWarp(mod));
     Value warpId = udiv(threadId, warpSize);
     Value laneId = urem(threadId, warpSize);
     SmallVector<Value> multiDimLaneId =
-        delinearize(rewriter, loc, laneId, threadsPerWarp, order);
+        delinearize(rewriter, loc, laneId, threadsPerWarp, laneOrder);
 
     Value laneIdAxis = multiDimLaneId[axis];
 
@@ -313,9 +317,7 @@ private:
         getMultiDimWarpId(helper, warpId, loc, rewriter);
     Value warpIdAxis = multiDimWarpId[axis];
 
-    if (!helper.isReductionOnLayoutFastAxis()) {
-      std::reverse(order.begin(), order.end());
-    }
+    auto order = helper.getOrderWithAxisAtBeginning();
 
     for (auto &it : accs) {
       const SmallVector<unsigned> &key = it.first;
@@ -339,7 +341,8 @@ private:
                                    ConversionPatternRewriter &rewriter) const {
     triton::ReduceOp op = helper.getOperation();
     auto srcLayout = helper.getSrcLayout();
-    auto smemShape = helper.getScratchConfig();
+    auto srcShape = helper.getSrcShape();
+    auto smemShape = helper.getScratchRepShape();
     unsigned elems = product<unsigned>(smemShape);
     unsigned sizeInterWarps = helper.getInterWarpSizeWithUniqueData();
     Location loc = op.getLoc();
@@ -352,7 +355,7 @@ private:
     Value zero = i32_val(0);
 
     unsigned numThreads =
-        product<unsigned>(triton::gpu::getWarpsPerCTA(srcLayout)) *
+        product<unsigned>(triton::gpu::getWarpsPerCTA(srcLayout, srcShape)) *
         triton::gpu::TritonGPUDialect::getThreadsPerWarp(mod);
     unsigned elemsPerThread = std::max<unsigned>(elems / numThreads, 1);
     Value threadIsNeeded = icmp_slt(threadId, i32_val(elems));
@@ -398,17 +401,15 @@ private:
     triton::ReduceOp op = helper.getOperation();
     Location loc = op.getLoc();
     auto srcLayout = helper.getSrcLayout();
+    auto srcShape = helper.getSrcShape();
     auto axis = op.getAxis();
-    auto order = getOrder(srcLayout);
-    if (!helper.isReductionOnLayoutFastAxis()) {
-      std::reverse(order.begin(), order.end());
-    }
+    auto order = helper.getOrderWithAxisAtBeginning();
     SmallVector<Value> results(op.getNumOperands());
     for (unsigned i = 0; i < op.getNumOperands(); ++i) {
       if (auto resultTy =
-              op.getResult()[i].getType().dyn_cast<RankedTensorType>()) {
+              dyn_cast<RankedTensorType>(op.getResult()[i].getType())) {
         // nd-tensor where n >= 1
-        auto resultLayout = resultTy.getEncoding().cast<SliceEncodingAttr>();
+        auto resultLayout = cast<SliceEncodingAttr>(resultTy.getEncoding());
         unsigned resultElems = getTotalElemsPerThread(resultTy);
         auto resultIndices = emitIndices(loc, rewriter, resultLayout, resultTy);
         assert(resultIndices.size() == resultElems);

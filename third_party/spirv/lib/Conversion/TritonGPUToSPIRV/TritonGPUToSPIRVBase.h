@@ -5,6 +5,7 @@
 // is included after utility.h (due to conflict in `store` macro
 // and <atomic>
 #include "triton/Analysis/Allocation.h"
+#include "triton/Dialect/Triton/IR/Utility.h"
 
 #include "TypeConverter.h"
 //
@@ -20,7 +21,9 @@ using ::mlir::spirv::delinearize;
 using ::mlir::spirv::SharedMemoryObject;
 using ::mlir::triton::gpu::BlockedEncodingAttr;
 using ::mlir::triton::gpu::DotOperandEncodingAttr;
+using ::mlir::triton::gpu::MemDescType;
 using ::mlir::triton::gpu::SliceEncodingAttr;
+using ::mlir::triton::gpu::SwizzledSharedEncodingAttr;
 
 namespace mlir {
 namespace spirv {
@@ -312,7 +315,7 @@ public:
 
   DenseMap<unsigned, Value>
   getSwizzledSharedPtrs(Location loc, unsigned inVec, RankedTensorType srcTy,
-                        triton::gpu::SharedEncodingAttr resSharedLayout,
+                        triton::gpu::SwizzledSharedEncodingAttr resSharedLayout,
                         Type resElemTy, SharedMemoryObject &smemObj,
                         ConversionPatternRewriter &rewriter,
                         SmallVectorImpl<Value> &offsetVals,
@@ -356,25 +359,15 @@ public:
     unsigned perPhase = resSharedLayout.getPerPhase();
     unsigned maxPhase = resSharedLayout.getMaxPhase();
     // Order
-    auto inOrder = triton::gpu::getOrder(srcEncoding);
-    auto outOrder = triton::gpu::getOrder(resSharedLayout);
+    auto inOrder = triton::gpu::getOrder(srcTy);
+    auto outOrder = resSharedLayout.getOrder();
     assert(maxPhase == 1 ||
            outVec * maxPhase <= srcShape[outOrder[0]] &&
                "Swizzling would generate out of bounds memory accesses");
     // Tensor indices held by the current thread, as SPIRV values
     auto srcIndices = emitIndices(loc, rewriter, srcEncoding, srcTy, false);
-    // Swizzling with leading offsets
+    // Swizzling with leading offsets (not supported in SPIRV/OpenCL)
     unsigned swizzlingByteWidth = 0;
-    if (resSharedLayout.getHasLeadingOffset()) {
-      if (perPhase == 4 && maxPhase == 2)
-        swizzlingByteWidth = 32;
-      else if (perPhase == 2 && maxPhase == 4)
-        swizzlingByteWidth = 64;
-      else if (perPhase == 1 && maxPhase == 8)
-        swizzlingByteWidth = 128;
-      else
-        llvm::report_fatal_error("Unsupported shared layout.");
-    }
     unsigned numElemsPerSwizzlingRow =
         swizzlingByteWidth * 8 / resElemTy.getIntOrFloatBitWidth();
     Value numElemsPerSwizzlingRowVal = i32_val(numElemsPerSwizzlingRow);
@@ -411,7 +404,7 @@ public:
           if (auto _cst = dyn_cast_or_null<spirv::ConstantOp>(
                   add.getOperand2().getDefiningOp())) {
             unsigned cst =
-                _cst.getValue().cast<IntegerAttr>().getValue().getSExtValue();
+                cast<IntegerAttr>(_cst.getValue()).getValue().getSExtValue();
             unsigned key = cst % (outVec * maxPhase);
             cacheCol.insert({key, idxCol});
             idxCol = cacheCol[key];
@@ -421,7 +414,7 @@ public:
           if (auto _cst = dyn_cast_or_null<spirv::ConstantOp>(
                   add.getOperand2().getDefiningOp())) {
             unsigned cst =
-                _cst.getValue().cast<IntegerAttr>().getValue().getSExtValue();
+                cast<IntegerAttr>(_cst.getValue()).getValue().getSExtValue();
             unsigned key = cst % (perPhase * maxPhase);
             cacheRow.insert({key, idxRow});
             idxRow = cacheRow[key];
@@ -458,21 +451,20 @@ public:
                           Value src, SharedMemoryObject &smemObj, Type elemTy,
                           Location loc,
                           ConversionPatternRewriter &rewriter) const {
-    auto dstTy = dst.getType().cast<RankedTensorType>();
+    auto dstTy = cast<RankedTensorType>(dst.getType());
     auto dstShape = dstTy.getShape();
     assert(dstShape.size() == 2 &&
            "Unexpected rank of loadSharedToDistributed");
-    auto srcTy = src.getType().cast<RankedTensorType>();
+    auto srcMemDescTy = cast<MemDescType>(src.getType());
     auto dstDistributedLayout = dstTy.getEncoding();
     auto srcSharedLayout =
-        srcTy.getEncoding().cast<triton::gpu::SharedEncodingAttr>();
-    auto srcElemTy = srcTy.getElementType();
+        cast<SwizzledSharedEncodingAttr>(srcMemDescTy.getEncoding());
+    auto srcElemTy = srcMemDescTy.getElementType();
     auto dstElemTy = dstTy.getElementType();
-    auto inOrd = triton::gpu::getOrder(srcSharedLayout);
-    auto outOrd = triton::gpu::getOrder(dstDistributedLayout);
-    unsigned outVec = inOrd == outOrd
-                          ? triton::gpu::getUniqueContigPerThread(
-                                dstDistributedLayout, dstShape)[outOrd[0]]
+    auto inOrd = srcSharedLayout.getOrder();
+    auto outOrd = triton::gpu::getOrder(dstTy);
+    unsigned outVec = ArrayRef<unsigned>(inOrd) == ArrayRef<unsigned>(outOrd)
+                          ? triton::gpu::getContigPerThread(dstTy)[outOrd[0]]
                           : 1;
     unsigned inVec = srcSharedLayout.getVec();
     unsigned minVec = std::min(outVec, inVec);
@@ -509,20 +501,19 @@ public:
                                 Value dst, Value smemBase, Type elemTy,
                                 Location loc,
                                 ConversionPatternRewriter &rewriter) const {
-    auto srcTy = src.getType().cast<RankedTensorType>();
+    auto srcTy = cast<RankedTensorType>(src.getType());
     auto srcShape = srcTy.getShape();
     assert(srcShape.size() == 2 &&
            "Unexpected rank of storeDistributedToShared");
-    auto dstTy = dst.getType().cast<RankedTensorType>();
+    auto dstMemDescTy = cast<MemDescType>(dst.getType());
     auto srcDistributedLayout = srcTy.getEncoding();
     auto dstSharedLayout =
-        dstTy.getEncoding().cast<triton::gpu::SharedEncodingAttr>();
-    auto dstElemTy = dstTy.getElementType();
-    auto inOrd = triton::gpu::getOrder(srcDistributedLayout);
+        cast<SwizzledSharedEncodingAttr>(dstMemDescTy.getEncoding());
+    auto dstElemTy = dstMemDescTy.getElementType();
+    auto inOrd = triton::gpu::getOrder(srcTy);
     auto outOrd = dstSharedLayout.getOrder();
-    unsigned inVec = inOrd == outOrd
-                         ? triton::gpu::getUniqueContigPerThread(
-                               srcDistributedLayout, srcShape)[inOrd[0]]
+    unsigned inVec = ArrayRef<unsigned>(inOrd) == ArrayRef<unsigned>(outOrd)
+                         ? triton::gpu::getContigPerThread(srcTy)[inOrd[0]]
                          : 1;
     unsigned outVec = dstSharedLayout.getVec();
     unsigned minVec = std::min(outVec, inVec);
@@ -568,18 +559,21 @@ public:
   // -----------------------------------------------------------------------
   Value getMask(Type valueTy, ConversionPatternRewriter &rewriter,
                 Location loc) const {
-    auto tensorTy = valueTy.dyn_cast<RankedTensorType>();
+    auto tensorTy = dyn_cast<RankedTensorType>(valueTy);
     Value mask = int_val(1, 1);
     auto tid = tid_val();
     if (tensorTy) {
       auto layout = tensorTy.getEncoding();
       auto shape = tensorTy.getShape();
       unsigned rank = shape.size();
-      auto sizePerThread = triton::gpu::getSizePerThread(layout);
-      auto threadsPerWarp = triton::gpu::getThreadsPerWarp(layout);
-      auto warpsPerCTA = triton::gpu::getWarpsPerCTA(layout);
-      auto order = triton::gpu::getOrder(layout);
-      auto shapePerCTATile = triton::gpu::getShapePerCTATile(layout, shape);
+      auto llEnc = triton::gpu::toLinearEncoding(tensorTy);
+      auto sizePerThread = llEnc.getSizePerThread();
+      auto threadsPerWarp = llEnc.getThreadsPerWarp();
+      auto warpsPerCTA = llEnc.getWarpsPerCTA();
+      auto order = triton::gpu::getOrder(tensorTy);
+      SmallVector<unsigned> shapePerCTATile;
+      for (auto [s, t, w] : llvm::zip(sizePerThread, threadsPerWarp, warpsPerCTA))
+        shapePerCTATile.push_back(s * t * w);
 
       auto mod = rewriter.getInsertionPoint()->getParentOfType<ModuleOp>();
       Value warpSize =
@@ -712,10 +706,10 @@ public:
       if (cache)
         restoreInsertionPointIfSet(insertPt, rewriter);
       SmallVector<Value> result;
-      if (auto blockedLayout = layout.dyn_cast<BlockedEncodingAttr>()) {
+      if (auto blockedLayout = dyn_cast<BlockedEncodingAttr>(layout)) {
         result = emitBaseIndexWithinCTAForBlockedLayout(loc, rewriter,
                                                         blockedLayout, type);
-      } else if (auto sliceLayout = layout.dyn_cast<SliceEncodingAttr>()) {
+      } else if (auto sliceLayout = dyn_cast<SliceEncodingAttr>(layout)) {
         auto parentLayout = sliceLayout.getParent();
         auto parentShape = sliceLayout.paddedShape(type.getShape());
         RankedTensorType parentTy = RankedTensorType::get(
@@ -744,9 +738,9 @@ public:
 
   SmallVector<SmallVector<unsigned>>
   emitOffsetForLayout(Attribute layout, RankedTensorType type) const {
-    if (auto blockedLayout = layout.dyn_cast<BlockedEncodingAttr>())
+    if (auto blockedLayout = dyn_cast<BlockedEncodingAttr>(layout))
       return emitOffsetForBlockedLayout(blockedLayout, type);
-    if (auto sliceLayout = layout.dyn_cast<SliceEncodingAttr>())
+    if (auto sliceLayout = dyn_cast<SliceEncodingAttr>(layout))
       return emitOffsetForSliceLayout(sliceLayout, type);
     llvm_unreachable("unsupported emitOffsetForLayout");
   }
@@ -767,10 +761,10 @@ public:
       if (cache)
         restoreInsertionPointIfSet(insertPt, b);
       SmallVector<SmallVector<Value>> result;
-      if (auto blocked = layout.dyn_cast<BlockedEncodingAttr>()) {
+      if (auto blocked = dyn_cast<BlockedEncodingAttr>(layout)) {
         result = emitIndicesForDistributedLayout(loc, b, blocked, type,
                                                  withCTAOffset);
-      } else if (auto slice = layout.dyn_cast<SliceEncodingAttr>()) {
+      } else if (auto slice = dyn_cast<SliceEncodingAttr>(layout)) {
         result =
             emitIndicesForDistributedLayout(loc, b, slice, type, withCTAOffset);
       } else {
@@ -855,7 +849,9 @@ private:
     auto threadsPerWarp = blockedLayout.getThreadsPerWarp();
     auto warpsPerCTA = blockedLayout.getWarpsPerCTA();
     auto order = blockedLayout.getOrder();
-    auto shapePerCTATile = getShapePerCTATile(blockedLayout);
+    SmallVector<unsigned> shapePerCTATile;
+    for (auto [s, t, w] : llvm::zip(sizePerThread, threadsPerWarp, warpsPerCTA))
+      shapePerCTATile.push_back(s * t * w);
     auto shapePerCTA = triton::gpu::getShapePerCTA(blockedLayout, shape);
 
     unsigned rank = shape.size();

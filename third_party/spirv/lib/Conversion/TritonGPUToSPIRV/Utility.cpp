@@ -66,7 +66,7 @@ SharedMemoryObject
 getSharedMemoryObjectFromStruct(Location loc, Value spirvStruct,
                                 ConversionPatternRewriter &rewriter) {
   auto types =
-      spirvStruct.getType().cast<spirv::StructType>().getElementTypes();
+      cast<spirv::StructType>(spirvStruct.getType()).getElementTypes();
   SmallVector<Value> elems(types.size());
   for (unsigned i = 0; i < types.size(); ++i) {
     Type type = types[i];
@@ -104,7 +104,7 @@ SmallVector<Value> delinearize(ConversionPatternRewriter &rewriter,
   SmallVector<Value> reorderedMultiDim(rank);
   if (auto constantOp = linear.getDefiningOp<arith::ConstantOp>()) {
     unsigned intVal =
-        constantOp.getValue().cast<IntegerAttr>().getValue().getSExtValue();
+        cast<IntegerAttr>(constantOp.getValue()).getValue().getSExtValue();
     reorderedMultiDim = delinearize(rewriter, loc, intVal, reordered);
   } else {
     reorderedMultiDim = delinearize(rewriter, loc, linear, reordered);
@@ -192,7 +192,7 @@ void storeShared(ConversionPatternRewriter &rewriter, Location loc, Value ptr,
 
 Value loadShared(ConversionPatternRewriter &rewriter, Location loc, Value ptr,
                  Value pred) {
-  auto ptrTy = ptr.getType().cast<spirv::PointerType>();
+  auto ptrTy = cast<spirv::PointerType>(ptr.getType());
   auto retTy = ptrTy.getPointeeType();
 
   // scalar load
