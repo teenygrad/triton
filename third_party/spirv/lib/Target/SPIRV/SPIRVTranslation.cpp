@@ -1,3 +1,4 @@
+#include "Conversion/TritonGPUToSPIRV/TritonGPUToSPIRVPass.h"
 #include "mlir/Conversion/Passes.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Dialect/SPIRV/IR/SPIRVOps.h"
@@ -11,7 +12,6 @@
 #include "mlir/Target/SPIRV/Serialization.h"
 #include "mlir/Transforms/Passes.h"
 #include "triton/Conversion/TritonGPUToLLVM/Passes.h"
-#include "Conversion/TritonGPUToSPIRV/TritonGPUToSPIRVPass.h"
 #include "triton/Tools/Sys/GetEnv.hpp"
 
 // SPIRV-Tools/tools/io.h is an internal header not available from system
@@ -218,10 +218,8 @@ getExternLibs(spirv::ModuleOp module) {
 
   for (auto &func : funcs) {
     if (func.getOperation()->hasAttr("libname")) {
-      auto name =
-          dyn_cast<StringAttr>(func.getOperation()->getAttr("libname"));
-      auto path =
-          dyn_cast<StringAttr>(func.getOperation()->getAttr("libpath"));
+      auto name = dyn_cast<StringAttr>(func.getOperation()->getAttr("libname"));
+      auto path = dyn_cast<StringAttr>(func.getOperation()->getAttr("libpath"));
       if (name) {
         std::string libName = name.str();
         // Note: skip the libdevice path. Use the Intel IMF lib.
@@ -232,8 +230,8 @@ getExternLibs(spirv::ModuleOp module) {
   }
 
   if (module.getOperation()->hasAttr("triton_gpu.externs")) {
-    auto dict = dyn_cast<DictionaryAttr>(module.getOperation()
-                    ->getAttr("triton_gpu.externs"));
+    auto dict = dyn_cast<DictionaryAttr>(
+        module.getOperation()->getAttr("triton_gpu.externs"));
     for (auto &attr : dict) {
       auto libName = attr.getName().strref().trim().str();
       // Note: skip the libdevice path. Use the Intel IMF lib.
@@ -249,7 +247,8 @@ getExternLibs(spirv::ModuleOp module) {
                                           "libsycl-fallback-imf-fp64.spv",
                                           "libsycl-fallback-cassert.spv"};
     // first search for environmental path
-    std::string env_path = ::mlir::triton::tools::getStrEnv("TRITON_LIBDEVICE_PATH");
+    std::string env_path =
+        ::mlir::triton::tools::getStrEnv("TRITON_LIBDEVICE_PATH");
     if (!env_path.empty()) {
       for (auto &lib_name : lib_names) {
         externLibs.try_emplace(lib_name, env_path + "/" + lib_name);
@@ -377,9 +376,9 @@ static LogicalResult translateTritonSPIRVToSPIRVIR(ModuleOp module,
     return module.emitError("found more than one 'spv.module' op");
 
   for (auto &sprivModule : spirvModules) {
-    int threadsPerWarp = cast<IntegerAttr>(
-                             sprivModule->getAttr("triton_gpu.threads-per-warp"))
-                             .getInt();
+    int threadsPerWarp =
+        cast<IntegerAttr>(sprivModule->getAttr("triton_gpu.threads-per-warp"))
+            .getInt();
     sprivModule.walk([&](spirv::FuncOp op) {
       auto entryPointAttrName = spirv::getEntryPointABIAttrName();
       auto entryPointAttr =
@@ -447,29 +446,19 @@ std::string translateTritonGPUToSPIRVIR(
     llvm::errs() << "failed to apply pass manager CL options\n";
     return nullptr;
   }
-  auto printingFlags = mlir::OpPrintingFlags();
-  printingFlags.elideLargeElementsAttrs(16);
-  pm.enableIRPrinting(
-      /*shouldPrintBeforePass=*/
-      [](mlir::Pass *, mlir::Operation *) { return false; },
-      /*shouldPrintAfterPass=*/
-      [](mlir::Pass *pass, mlir::Operation *) {
-        return ::mlir::triton::tools::getBoolEnv("MLIR_ENABLE_DUMP");
-      },
-      /*printModuleScope=*/false,
-      /*printAfterOnlyOnChange=*/true,
-      /*printAfterOnlyOnFailure*/ false, llvm::dbgs(), printingFlags);
 
   pm.addPass(mlir::createSCFToControlFlowPass());
   pm.addPass(createConvertTritonGPUToSPIRVPass(computeCapability));
   //  pm.addPass(mlir::arith::createConvertArithToSPIRVPass());
+
   // Canonicalize to eliminate the remaining UnrealizedConversionCastOp
   pm.addPass(mlir::createReconcileUnrealizedCastsPass());
-  // pm.addPass(mlir::createCanonicalizerPass());
+  pm.addPass(mlir::createCanonicalizerPass());
+
   // Simplify the IR
   pm.addPass(mlir::createCSEPass());
   pm.addPass(mlir::createSymbolDCEPass());
-  // pm.addPass(mlir::createCanonicalizerPass());
+  pm.addPass(mlir::createCanonicalizerPass());
 
   std::string spirvModule;
   if (failed(pm.run(module))) {

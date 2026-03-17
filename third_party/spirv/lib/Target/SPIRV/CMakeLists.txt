@@ -3,11 +3,11 @@ find_package(SPIRV-Tools CONFIG REQUIRED)
 find_package(SPIRV-Tools-opt CONFIG REQUIRED)
 find_package(SPIRV-Tools-link CONFIG REQUIRED)
 
-add_mlir_translation_library(TritonSPIRV
+add_triton_library(TritonSPIRV
         SPIRVTranslation.cpp
 
-        LINK_COMPONENTS
-        Core
+        # LINK_COMPONENTS
+        # Core
 
         LINK_LIBS PUBLIC
         MLIRIR
