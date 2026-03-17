@@ -2,10 +2,8 @@
 #define TRITON_SPIRVTRANSLATION_H
 
 #include "mlir/IR/BuiltinOps.h"
-#include "llvm/ADT/StringRef.h"
 #include "llvm/IR/Module.h"
 #include <any>
-#include <memory>
 #include <string>
 #include <vector>
 

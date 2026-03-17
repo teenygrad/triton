@@ -1,4 +1,4 @@
-add_mlir_conversion_library(TritonGPUToSPIRV
+add_triton_library(TritonGPUToSPIRV
     TritonGPUToSPIRV.cpp
     ReshapeOpToSPIRV.cpp
     ElementwiseOpToSPIRV.cpp
@@ -14,14 +14,14 @@ add_mlir_conversion_library(TritonGPUToSPIRV
     DotOpToSPIRV.cpp
 
 
-    ADDITIONAL_HEADER_DIRS
-    ${PROJECT_SOURCE_DIR}/include/triton/Conversion/TritonGPUToSPIRV
+    # ADDITIONAL_HEADER_DIRS
+    # ${PROJECT_SOURCE_DIR}/include/triton/Conversion/TritonGPUToSPIRV
 
     DEPENDS
     TritonGPUToSPIRVConversionPassIncGen
 
-    LINK_COMPONENTS
-    Core
+    # LINK_COMPONENTS
+    # Core
 
     LINK_LIBS PUBLIC
     MLIRIR
