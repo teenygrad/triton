@@ -657,6 +657,7 @@ struct ExpOpConversionApprox
   }
 };
 
+
 struct ClampFOpConversion
     : ElementwiseOpConversionBase<ClampFOp, ClampFOpConversion> {
   using Base = ElementwiseOpConversionBase<ClampFOp, ClampFOpConversion>;
@@ -795,6 +796,58 @@ private:
 } // namespace
 } // namespace gpu
 
+// LogOpConversionApprox and Log2OpConversionApprox are placed outside the
+// anonymous namespace so the linker does not drop them as dead code when
+// linking libtriton.a into librustc_driver.so via --gc-sections.
+namespace gpu {
+
+struct LogOpConversionApprox
+    : ElementwiseOpConversionBase<math::LogOp, LogOpConversionApprox> {
+  using Base = ElementwiseOpConversionBase<math::LogOp, LogOpConversionApprox>;
+  using Base::Base;
+  using Adaptor = typename Base::OpAdaptor;
+
+  SmallVector<Value> createDestOps(math::LogOp op, OpAdaptor adaptor,
+                                   ConversionPatternRewriter &rewriter,
+                                   Type elemTy, MultipleOperandsRange operands,
+                                   Location loc) const {
+    auto b = TritonLLVMOpBuilder(loc, rewriter);
+    if (getIntOrFloatOrPtrBitWidth(elemTy) != 32)
+      return {};
+    Type resultTy = operands[0][0].getType();
+    StringRef name = "llvm.nvvm.lg2.approx.f";
+    auto callOp = LLVM::createLLVMIntrinsicCallOp(rewriter, loc, name,
+                                                   resultTy, {operands[0][0]});
+    const double ln2 = 0.6931471805599453;
+    Value result = b.fmul(f32_ty, callOp.getResult(0), b.f32_val(ln2));
+    return {result};
+  }
+};
+
+struct Log2OpConversionApprox
+    : ElementwiseOpConversionBase<math::Log2Op, Log2OpConversionApprox> {
+  using Base =
+      ElementwiseOpConversionBase<math::Log2Op, Log2OpConversionApprox>;
+  using Base::Base;
+  using Adaptor = typename Base::OpAdaptor;
+
+  SmallVector<Value> createDestOps(math::Log2Op op, OpAdaptor adaptor,
+                                   ConversionPatternRewriter &rewriter,
+                                   Type elemTy, MultipleOperandsRange operands,
+                                   Location loc) const {
+    auto b = TritonLLVMOpBuilder(loc, rewriter);
+    if (getIntOrFloatOrPtrBitWidth(elemTy) != 32)
+      return {};
+    Type resultTy = operands[0][0].getType();
+    StringRef name = "llvm.nvvm.lg2.approx.f";
+    auto callOp = LLVM::createLLVMIntrinsicCallOp(rewriter, loc, name,
+                                                   resultTy, {operands[0][0]});
+    return {callOp.getResult(0)};
+  }
+};
+
+} // namespace gpu
+
 } // namespace mlir::triton
 
 void mlir::triton::NVIDIA::populateElementwiseOpToLLVMPatterns(
@@ -836,6 +889,15 @@ void mlir::triton::NVIDIA::populateElementwiseOpToLLVMPatterns(
   // ElementwiseOpConversion<math::ExpOp, math::ExpOp> defined below will call
   // __nv_expf for higher-precision calculation
   patterns.add<ExpOpConversionApprox>(typeConverter, axisInfoAnalysis, benefit);
+  // LogOpConversionApprox and Log2OpConversionApprox use lg2.approx for FP32,
+  // avoiding a libdevice dependency for math.log / math.log2. Use a higher
+  // benefit to ensure they take priority over the identity lowering registered
+  // by populateElementwiseOpToLLVMPatterns above.
+  PatternBenefit logBenefit(benefit.getBenefit() + 1);
+  patterns.add<mlir::triton::gpu::LogOpConversionApprox>(typeConverter, axisInfoAnalysis,
+                                      logBenefit);
+  patterns.add<Log2OpConversionApprox>(typeConverter, axisInfoAnalysis,
+                                       logBenefit);
   bool hwNanPropagationSupported = computeCapability >= 80;
   mlir::triton::populateMinMaxFOpToLLVMPattern(
       typeConverter, patterns, axisInfoAnalysis, hwNanPropagationSupported,
