@@ -1202,37 +1202,27 @@ void WarpSpecializeOp::getSuccessorRegions(
     successors.emplace_back(&getPartitionOpHolder());
     return;
   }
-  // And the default region branches transparently back to the parent.
+  // And the default region branches transparently back to the parent. The
+  // successor inputs are the op results.
   if (src.getTerminatorPredecessorOrNull()->getParentRegion() ==
       &getDefaultRegion())
-    successors.push_back(RegionSuccessor::parent());
-}
-
-ValueRange WarpSpecializeOp::getSuccessorInputs(RegionSuccessor successor) {
-  // When returning to parent, the successor inputs are the op results.
-  return successor.isParent() ? getResults() : ValueRange();
+    successors.push_back(RegionSuccessor(getOperation(), getResults()));
 }
 
 void WarpSpecializePartitionsOp::getSuccessorRegions(
     RegionBranchPoint src, SmallVectorImpl<RegionSuccessor> &successors) {
   // The parent branches to each of the partition regions, but nothing flows out
-  // of the partition regions.
+  // of the partition regions. The successor inputs are the block arguments of
+  // the partition region.
   if (src.isParent())
     for (Region &region : getPartitionRegions())
-      successors.emplace_back(&region);
+      successors.emplace_back(&region, region.getArguments());
 }
 
 OperandRange
 WarpSpecializePartitionsOp::getEntrySuccessorOperands(RegionSuccessor) {
   // Pass through the explicit captures from the enclosing WarpSpecializeOp.
   return getExplicitCaptures();
-}
-
-ValueRange
-WarpSpecializePartitionsOp::getSuccessorInputs(RegionSuccessor successor) {
-  // The successor inputs are the block arguments of the partition region.
-  Region *region = successor.getSuccessor();
-  return region ? region->getArguments() : ValueRange();
 }
 
 LogicalResult WarpSpecializeOp::verify() {
