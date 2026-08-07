@@ -25,6 +25,7 @@ option(TRITON_BUILD_UT "Build C++ Triton Unit Tests" ON)
 option(TRITON_BUILD_WITH_CCACHE "Build with ccache (if available)" ON)
 option(TRITON_OFFLINE_BUILD "Build without downloading dependencies" OFF)
 option(TRITON_EXT_ENABLED "Build with default visibility for Triton+LLVM symbol exposure to plugin extensions" OFF)
+option(TRITON_BUILD_EXAMPLES "Build the examples/plugins demo (MLIR dialect plugin loading)" ON)
 set(TRITON_CODEGEN_BACKENDS "" CACHE STRING "Enable different codegen backends")
 set(TRITON_VERSION "" CACHE STRING "Triton version string (passed from setup.py)")
 
@@ -477,7 +478,7 @@ if(TRITON_BUILD_PYTHON_MODULE)
     COPYONLY)
 
   # Build plugins when building libtriton since they depend on libtriton.
-  if(TRITON_EXT_ENABLED)
+  if(TRITON_EXT_ENABLED AND TRITON_BUILD_EXAMPLES)
     add_subdirectory(examples/plugins)
   endif()
 endif()
