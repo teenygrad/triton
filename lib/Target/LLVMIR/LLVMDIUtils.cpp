@@ -70,7 +70,8 @@ LLVM::DITypeAttr LLVMDIUtils::convertPtrType(MLIRContext *context,
       context, llvm::dwarf::DW_TAG_pointer_type,
       mlir::StringAttr::get(context, "pointer"), /*file=*/nullptr, /*line=*/0,
       /*scope=*/nullptr, diElTypeAttr, sizeInBits, /*alignInBits=*/0,
-      /*offset=*/0, addrSpace, mlir::LLVM::DIFlags::Zero,
+      /*offset=*/0, std::optional<unsigned>(addrSpace),
+      mlir::LLVM::DIFlags::Zero,
       /*extra data=*/nullptr);
   return diTypeAttr;
 }
