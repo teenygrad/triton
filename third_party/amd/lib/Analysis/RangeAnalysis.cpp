@@ -712,35 +712,16 @@ void TritonIntegerRangeAnalysis::visitRegionSuccessors(
 
     unsigned firstIndex = 0;
     if (inputs.size() != lattices.size()) {
-      auto appendNonSuccessorInputs = [&](ValueRange allInputs) {
-        SmallVector<Value> nonSuccessorInputs;
-        SmallVector<dataflow::IntegerValueRangeLattice *> nonSuccessorLattices;
-        auto appendRange = [&](unsigned start, unsigned end) {
-          for (unsigned i = start; i < end; ++i) {
-            nonSuccessorInputs.push_back(allInputs[i]);
-            nonSuccessorLattices.push_back(lattices[i]);
-          }
-        };
-
-        appendRange(0, firstIndex);
-        appendRange(firstIndex + inputs.size(), allInputs.size());
-
-        if (!nonSuccessorInputs.empty())
-          visitNonControlFlowArguments(branch, successor, nonSuccessorInputs,
-                                       nonSuccessorLattices);
-      };
-
       if (successor.isParent()) {
         if (!inputs.empty()) {
           firstIndex = cast<OpResult>(inputs.front()).getResultNumber();
         }
-        appendNonSuccessorInputs(branch->getResults());
       } else {
         if (!inputs.empty()) {
           firstIndex = cast<BlockArgument>(inputs.front()).getArgNumber();
         }
-        appendNonSuccessorInputs(successor.getSuccessor()->getArguments());
       }
+      visitNonControlFlowArguments(branch, successor, lattices, firstIndex);
     }
 
     for (auto [oper, argLat] :
