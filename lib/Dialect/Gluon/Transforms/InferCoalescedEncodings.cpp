@@ -35,7 +35,12 @@ ttg::CGAEncodingAttr getDefaultCGALayout(RankedTensorType refTensorType,
 
 bool isCoalescedEncodingTensorType(Type ty) {
   auto tensorTy = dyn_cast<RankedTensorType>(ty);
-  return tensorTy && isa<gluon::CoalescedEncodingAttr>(tensorTy.getEncoding());
+  // Guard against a null encoding: a hand-built or mixed (Language::TRITON-
+  // shaped) tensor may reach here with no encoding attached. isa<>(null)
+  // dereferences a null Attribute and segfaults, so treat "no encoding" as
+  // "not a coalesced-encoding tensor" rather than crashing (teenyc-6mv).
+  return tensorTy && tensorTy.getEncoding() &&
+         isa<gluon::CoalescedEncodingAttr>(tensorTy.getEncoding());
 }
 
 LogicalResult inferCoalescedLayout(ModuleOp &mod) {

@@ -20,7 +20,11 @@ namespace mlir::triton::gluon {
 namespace {
 bool isAutoEncodingTensorType(Type ty) {
   auto tensorTy = dyn_cast<RankedTensorType>(ty);
-  return tensorTy && isa<gluon::AutoEncodingAttr>(tensorTy.getEncoding());
+  // Guard against a null encoding (see InferCoalescedEncodings): isa<>(null)
+  // dereferences a null Attribute and segfaults on an unencoded tensor
+  // (teenyc-6mv).
+  return tensorTy && tensorTy.getEncoding() &&
+         isa<gluon::AutoEncodingAttr>(tensorTy.getEncoding());
 }
 LogicalResult inferAutoLayout(ModuleOp &mod) {
   for (auto &op : *mod.getBody()) {

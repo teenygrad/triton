@@ -329,6 +329,37 @@ def TritonGPUOptimizeAccumulatorInit: Pass<"tritongpu-optimize-accumulator-init"
                            "mlir::triton::TritonDialect"];
 }
 
+def TritonGPUStageSharedMemory: Pass<"tritongpu-stage-shared-memory", "mlir::ModuleOp"> {
+  let summary = "Stage marked tensor values through shared memory (teenyc-6mv)";
+
+  let description = [{
+    Prototype enabling a `Language::TRITON`-shaped kernel to mix ordinary
+    (register-layout) Triton ops with an explicit shared-memory staging step,
+    without hand-encoding every op or forcing the Gluon pipeline.
+
+    A front-end / codegen marks the op whose result should be staged with the
+    discardable unit attribute `ttg.stage_shared`. That attribute survives
+    `convert-triton-to-tritongpu`, which assigns a distributed (`#ttg.blocked`)
+    encoding to every tensor. This pass then runs *after* that conversion —
+    when the marked value already carries a concrete distributed encoding — and
+    rewrites each marked result `%v` into:
+
+        %buf = ttg.local_alloc : () -> !ttg.memdesc<..., #shared, #smem, mutable>
+        ttg.local_store %v, %buf
+        %staged = ttg.local_load %buf
+        // all later uses of %v now read %staged
+
+    Doing the insertion post-encoding is the whole point: `local_store`/
+    `local_load` reuse the encoding the conversion already chose, so there is
+    no null-encoding (which crashed the Gluon encoding-inference passes) and no
+    unresolved encoded<->unencoded materialization (which failed the direct
+    conversion route).
+  }];
+
+  let dependentDialects = ["mlir::triton::gpu::TritonGPUDialect",
+                           "mlir::triton::TritonDialect"];
+}
+
 def TritonGPUCoalesceAsyncCopy: Pass<"tritongpu-coalesce-async-copy", "mlir::ModuleOp"> {
   let summary = "Improve coalescing for async global to local copies";
 
