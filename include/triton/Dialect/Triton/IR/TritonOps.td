@@ -1409,5 +1409,75 @@ def TT_DescriptorScatterOp : TT_Op<"descriptor_scatter", [TT_DescriptorStoreLike
   let hasVerifier = 1;
 }
 
+//
+// Indexed shared-memory marker ops (teenyc-6mv / teenygrad-3w0.10)
+//
+// Front-end-only ops representing an indexed shared-memory buffer that a
+// kernel wants to stage a value through with control over WHICH row is
+// written and WHICH row is read back — unlike the same-shape-only
+// `ttg.stage_shared` marker (TritonGPU StageSharedMemory pass), which always
+// reads back with the exact indexing it was written with. These ops carry
+// no distributed encoding and must never survive past the
+// `tritongpu-lower-indexed-shared-memory` pass (TritonGPU Transforms), which
+// runs immediately after `convert-triton-to-tritongpu` — once their tensor
+// operands/results have earned a real `#ttg.blocked` encoding via the
+// ordinary `GenericOpPattern` conversion every other Triton op goes through
+// — and rewrites each marker into the real `ttg.local_alloc`/
+// `memdesc_index`/`local_store`/`barrier`/`memdesc_trans`/`local_load`
+// sequence.
+def TT_SharedAllocOp : TT_Op<"shared_alloc"> {
+  let summary = "allocate a kernel-lifetime indexed shared-memory buffer (front-end marker)";
+
+  let arguments = (ins
+    DenseI64ArrayAttr:$shape,
+    TypeAttr:$elem_type
+  );
+
+  let results = (outs TT_SharedMemType:$result);
+
+  let assemblyFormat = "attr-dict `:` type($result)";
+}
+
+def TT_SharedStoreIndexOp : TT_Op<"shared_store_index"> {
+  let summary = "store a 1-D tile into row `index` of an indexed shared-memory buffer (front-end marker)";
+
+  let arguments = (ins
+    TT_SharedMemType:$buf,
+    I32:$index,
+    TT_Tensor:$src
+  );
+
+  let assemblyFormat = "$buf `[` $index `]` `,` $src attr-dict `:` type($src)";
+}
+
+def TT_SharedBarrierOp : TT_Op<"shared_barrier"> {
+  let summary = "CTA-wide barrier between an indexed shared-memory write and a later read (front-end marker)";
+
+  let assemblyFormat = "attr-dict";
+}
+
+def TT_SharedTransOp : TT_Op<"shared_trans"> {
+  let summary = "transpose an indexed shared-memory buffer's logical row/column order (front-end marker)";
+
+  let arguments = (ins TT_SharedMemType:$buf);
+
+  let results = (outs TT_SharedMemType:$result);
+
+  let assemblyFormat = "$buf attr-dict";
+}
+
+def TT_SharedLoadIndexOp : TT_Op<"shared_load_index"> {
+  let summary = "load a 1-D tile from row `index` of an indexed shared-memory buffer (front-end marker)";
+
+  let arguments = (ins
+    TT_SharedMemType:$buf,
+    I32:$index
+  );
+
+  let results = (outs TT_Tensor:$result);
+
+  let assemblyFormat = "$buf `[` $index `]` attr-dict `:` type($result)";
+}
+
 
 #endif // Triton_OPS

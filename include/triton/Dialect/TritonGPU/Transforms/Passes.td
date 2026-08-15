@@ -360,6 +360,43 @@ def TritonGPUStageSharedMemory: Pass<"tritongpu-stage-shared-memory", "mlir::Mod
                            "mlir::triton::TritonDialect"];
 }
 
+def TritonGPULowerIndexedSharedMemory: Pass<"tritongpu-lower-indexed-shared-memory", "mlir::ModuleOp"> {
+  let summary = "Lower indexed shared-memory buffer marker ops into real ttg ops (teenyc-6mv / teenygrad-3w0.10)";
+
+  let description = [{
+    `ttg.stage_shared`/`TritonGPUStageSharedMemory` only supports same-shape
+    stage-and-readback: it stages one value through shared memory and reads
+    it back with the exact indexing it was written with, so it cannot express
+    a kernel-lifetime buffer written at row `i` in one loop iteration and read
+    at column `j` in another (e.g. a shared-memory-staged transpose).
+
+    A front-end marks that pattern with five `tt.shared_*` ops instead
+    (`tt.shared_alloc` / `tt.shared_store_index` / `tt.shared_barrier` /
+    `tt.shared_trans` / `tt.shared_load_index`, TritonOps.td). Those ops carry
+    real tensor/index operands (not a bare attribute), so — unlike a
+    hand-built `ttg.*` op — they go through ordinary
+    `convert-triton-to-tritongpu` `GenericOpPattern` conversion just like
+    `tt.load`/`tt.store`, and their tensor operands/results earn a real
+    `#ttg.blocked` encoding there.
+
+    This pass then runs *after* that conversion and rewrites each
+    `tt.shared_*` op, in program order, into the real op it stands in for:
+
+        tt.shared_alloc                  -> ttg.local_alloc
+        tt.shared_store_index(buf, i, v) -> ttg.memdesc_index(buf, i); ttg.local_store v, row
+        tt.shared_barrier                -> ttg.barrier local
+        tt.shared_trans(buf)             -> ttg.memdesc_trans buf
+        tt.shared_load_index(buf, j)     -> ttg.memdesc_index(buf, j); ttg.local_load row
+
+    reusing the encoding the conversion already chose for every tensor
+    operand/result, so there is no unresolved encoded<->unencoded
+    materialization and no Gluon involved.
+  }];
+
+  let dependentDialects = ["mlir::triton::gpu::TritonGPUDialect",
+                           "mlir::triton::TritonDialect"];
+}
+
 def TritonGPUCoalesceAsyncCopy: Pass<"tritongpu-coalesce-async-copy", "mlir::ModuleOp"> {
   let summary = "Improve coalescing for async global to local copies";
 

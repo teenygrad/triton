@@ -26,6 +26,7 @@ add_triton_library(TritonGPUTransforms
   RemoveLayoutConversions.cpp
   ReorderInstructions.cpp
   StageSharedMemory.cpp
+  LowerIndexedSharedMemory.cpp
   CoalesceAsyncCopy.cpp
   Utility.cpp
   CoalesceUtils.cpp

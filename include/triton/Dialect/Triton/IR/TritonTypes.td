@@ -131,4 +131,28 @@ def TT_TensorDescType : TritonTypeDef<"TensorDesc", "tensordesc", [TT_TensorDesc
   ];
 }
 
+// teenyc-6mv / teenygrad-3w0.10: opaque front-end marker for a kernel-lifetime
+// indexed shared-memory buffer. Deliberately carries no shape/element-type
+// parameters (unlike `ttg.memdesc`, which needs a distributed encoding this
+// type must NOT have yet): `tt.shared_alloc`/`tt.shared_store_index`/
+// `tt.shared_trans`/`tt.shared_load_index` (TritonOps.td) go through the
+// normal `convert-triton-to-tritongpu` `GenericOpPattern` conversion like any
+// other Triton op, so their tensor operands/results earn a real
+// `#ttg.blocked` encoding from that pass. The `tritongpu-lower-indexed-
+// shared-memory` pass then rewrites the marked ops into the real
+// `ttg.local_alloc`/`memdesc_index`/`local_store`/`barrier`/`memdesc_trans`/
+// `local_load` sequence, recovering shape/element type by walking back to the
+// defining `tt.shared_alloc` (which carries them as attributes) through any
+// intervening `tt.shared_trans`.
+def TT_SharedMemType : TritonTypeDef<"SharedMem", "shared_mem"> {
+  let summary = "opaque handle to a kernel-lifetime indexed shared-memory buffer (front-end marker only)";
+
+  let description = [{
+    Front-end-only placeholder type produced by `tt.shared_alloc` /
+    `tt.shared_trans` and consumed by `tt.shared_store_index` /
+    `tt.shared_trans` / `tt.shared_load_index`. Never appears in TTGIR after
+    the `tritongpu-lower-indexed-shared-memory` pass runs.
+  }];
+}
+
 #endif

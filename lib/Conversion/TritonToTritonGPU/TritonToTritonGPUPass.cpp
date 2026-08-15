@@ -602,7 +602,17 @@ void populateTritonPatterns(TritonGPUTypeConverter &typeConverter,
       GenericOpPattern<triton::DotScaledOp>,
       GenericOpPattern<triton::CallOp>,
       GenericOpPattern<ReturnOp>,
-      TritonFuncOpPattern
+      TritonFuncOpPattern,
+      // teenyc-6mv / teenygrad-3w0.10: indexed shared-memory front-end
+      // markers. Must go through ordinary conversion (not stay "legal" like
+      // the TritonGPU dialect) so their tensor operands/results earn a real
+      // #ttg.blocked encoding here, for `tritongpu-lower-indexed-shared-
+      // memory` to reuse afterwards.
+      GenericOpPattern<triton::SharedAllocOp>,
+      GenericOpPattern<triton::SharedStoreIndexOp>,
+      GenericOpPattern<triton::SharedBarrierOp>,
+      GenericOpPattern<triton::SharedTransOp>,
+      GenericOpPattern<triton::SharedLoadIndexOp>
       // clang-format on
       >(typeConverter, context);
 }
