@@ -1221,7 +1221,7 @@ void WarpSpecializePartitionsOp::getSuccessorRegions(
   // the partition region.
   if (src.isParent())
     for (Region &region : getPartitionRegions())
-      successors.emplace_back(&region, region.getArguments());
+      successors.emplace_back(&region);
 }
 
 OperandRange
