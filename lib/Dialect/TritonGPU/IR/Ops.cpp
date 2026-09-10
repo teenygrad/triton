@@ -1230,6 +1230,13 @@ WarpSpecializePartitionsOp::getEntrySuccessorOperands(RegionSuccessor) {
   return getExplicitCaptures();
 }
 
+ValueRange
+WarpSpecializePartitionsOp::getSuccessorInputs(RegionSuccessor successor) {
+  // The successor inputs are the block arguments of the partition region.
+  Region *region = successor.getSuccessor();
+  return region ? region->getArguments() : ValueRange();
+}
+
 LogicalResult WarpSpecializeOp::verify() {
   // The default region is not isolated from above but the partition regions
   // have to be. MLIR does not support this, so we hide an op inside another

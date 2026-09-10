@@ -285,6 +285,12 @@ if(NOT MSVC)
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DTRITON_EXT_ENABLED=1")
   endif()
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Werror -Wno-covered-switch-default ")
+  if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    # Triton's -Werror assumes clang (-Wno-covered-switch-default is clang-only).
+    # GCC 13 additionally reports a false -Wfree-nonheap-object inside
+    # libstdc++'s new_allocator.h when building python/src/ir.cc at -O3.
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-free-nonheap-object ")
+  endif()
 else()
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /wd4244 /wd4624 /wd4715 /wd4530")
 endif()
