@@ -1206,7 +1206,12 @@ void WarpSpecializeOp::getSuccessorRegions(
   // successor inputs are the op results.
   if (src.getTerminatorPredecessorOrNull()->getParentRegion() ==
       &getDefaultRegion())
-    successors.push_back(RegionSuccessor(getOperation(), getResults()));
+    successors.push_back(RegionSuccessor(getOperation()));
+}
+
+ValueRange WarpSpecializeOp::getSuccessorInputs(RegionSuccessor successor) {
+  // When returning to parent, the successor inputs are the op results.
+  return successor.isOperation() ? getResults() : ValueRange();
 }
 
 void WarpSpecializePartitionsOp::getSuccessorRegions(
