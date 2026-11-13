@@ -59,7 +59,9 @@ TEST(Analysis, SharedMemoryEffectsPreserveResourceAndKind) {
     for (const auto &effect : effects) {
       auto shared = dyn_cast<triton::gpu::SharedMemoryEffect>(&effect);
       ASSERT_TRUE(shared);
-      EXPECT_EQ(effect.getResource(), triton::gpu::SharedMemory::get());
+      // Upstream checks for SharedMemory itself; this fork's LLVM 23.1
+      // workaround puts TableGen-declared kinds on SharedMemory sub-resources.
+      EXPECT_TRUE(isa<triton::gpu::SharedMemory>(effect.getResource()));
       kinds.push_back(shared.getKind());
     }
   });
@@ -92,6 +94,23 @@ TEST(Analysis, SharedMemoryEffectsPreserveResourceAndKind) {
   MemoryEffects::EffectInstance unrelated(MemoryEffects::Read::get());
   EXPECT_FALSE(dyn_cast<triton::gpu::SharedMemoryEffect>(&allocation));
   EXPECT_FALSE(dyn_cast<triton::gpu::SharedMemoryEffect>(&unrelated));
+}
+
+// The sub-resources must all overlap: CSE skips a write between two reads when
+// the resources are disjoint, which would be wrong for different kinds of
+// access to the same shared memory.
+TEST(Analysis, SharedMemorySubresourcesOverlap) {
+  SmallVector<SideEffects::Resource *> resources = {
+      triton::gpu::SharedMemory::get(),
+      triton::gpu::GenericSharedMemory::get(),
+      triton::gpu::AsyncSharedMemory::get(),
+      triton::gpu::BarrierSharedMemory::get()};
+  for (auto *a : resources)
+    for (auto *b : resources)
+      EXPECT_FALSE(a->isDisjointFrom(b))
+          << a->getName().str() << " vs " << b->getName().str();
+  EXPECT_TRUE(triton::gpu::SharedMemory::get()->isDisjointFrom(
+      triton::GlobalMemory::get()));
 }
 
 TEST(Analysis, AddressSetExhaustiveEightUnitUniverse) {

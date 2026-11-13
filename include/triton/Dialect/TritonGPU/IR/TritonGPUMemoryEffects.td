@@ -4,18 +4,14 @@
 include "mlir/Interfaces/SideEffectInterfaces.td"
 
 def SharedMemory : Resource<"::mlir::triton::gpu::SharedMemory">;
-def GenericSharedMemory : Resource<
-    "::mlir::triton::gpu::SharedMemory",
-    [{::mlir::triton::gpu::SharedKindAttr::get(
-        getContext(), ::mlir::triton::gpu::SharedKind::Generic)}]>;
-def AsyncSharedMemory : Resource<
-    "::mlir::triton::gpu::SharedMemory",
-    [{::mlir::triton::gpu::SharedKindAttr::get(
-        getContext(), ::mlir::triton::gpu::SharedKind::Async)}]>;
-def BarrierSharedMemory : Resource<
-    "::mlir::triton::gpu::SharedMemory",
-    [{::mlir::triton::gpu::SharedKindAttr::get(
-        getContext(), ::mlir::triton::gpu::SharedKind::Barrier)}]>;
+// Upstream attaches the shared-memory kind as a resource parameter, which
+// needs LLVM b010a18d ("[mlir][ODS] Allow parameters on side-effect
+// resources"). The LLVM 23.1 TableGen this fork builds with predates it, so
+// each kind is a sub-resource of SharedMemory instead; see SharedMemoryEffect
+// in Dialect.h. Drop this once the shared LLVM carries b010a18d.
+def GenericSharedMemory : Resource<"::mlir::triton::gpu::GenericSharedMemory">;
+def AsyncSharedMemory : Resource<"::mlir::triton::gpu::AsyncSharedMemory">;
+def BarrierSharedMemory : Resource<"::mlir::triton::gpu::BarrierSharedMemory">;
 
 defvar GenericSharedRead = [MemRead<GenericSharedMemory>];
 defvar GenericSharedWrite = [MemWrite<GenericSharedMemory>];

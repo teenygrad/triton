@@ -103,6 +103,49 @@ struct SharedMemory : public SideEffects::Resource::Base<SharedMemory> {
   SideEffects::Resource *getParent() const override { return nullptr; }
 };
 
+// Stand-ins for upstream's SharedKind resource parameter, which TableGen-declared
+// effects cannot carry without LLVM b010a18d. They form a chain rather than
+// siblings because MLIR treats resources as disjoint unless one is an ancestor
+// of the other (CSE relies on this); a chain keeps every kind overlapping, as
+// the single parametrised resource does upstream.
+struct GenericSharedMemory
+    : public SideEffects::Resource::Base<GenericSharedMemory> {
+  StringRef getName() const final { return "<GenericSharedMemory>"; }
+  SideEffects::Resource *getParent() const override {
+    return SharedMemory::get();
+  }
+};
+
+struct AsyncSharedMemory
+    : public SideEffects::Resource::Base<AsyncSharedMemory> {
+  StringRef getName() const final { return "<AsyncSharedMemory>"; }
+  SideEffects::Resource *getParent() const override {
+    return GenericSharedMemory::get();
+  }
+};
+
+struct BarrierSharedMemory
+    : public SideEffects::Resource::Base<BarrierSharedMemory> {
+  StringRef getName() const final { return "<BarrierSharedMemory>"; }
+  SideEffects::Resource *getParent() const override {
+    return AsyncSharedMemory::get();
+  }
+};
+
+// The kind implied by a sub-resource. Exact IDs, not isa<>, because isa<>
+// follows the chain.
+inline std::optional<SharedKind>
+getSharedKindFromResource(const SideEffects::Resource *resource) {
+  TypeID id = resource->getResourceID();
+  if (id == GenericSharedMemory::getResourceID())
+    return SharedKind::Generic;
+  if (id == AsyncSharedMemory::getResourceID())
+    return SharedKind::Async;
+  if (id == BarrierSharedMemory::getResourceID())
+    return SharedKind::Barrier;
+  return std::nullopt;
+}
+
 class SharedMemoryEffect {
 public:
   SharedMemoryEffect(std::nullptr_t) : effect(nullptr) {}
@@ -113,11 +156,16 @@ public:
 
   static bool classof(const MemoryEffects::EffectInstance *effect) {
     return isa<SharedMemory>(effect->getResource()) &&
-           isa_and_present<SharedKindAttr>(effect->getParameters());
+           (isa_and_present<SharedKindAttr>(effect->getParameters()) ||
+            getSharedKindFromResource(effect->getResource()));
   }
 
+  // Hand-written effects (makeShared) carry the kind as a parameter;
+  // TableGen-declared ones carry it in the sub-resource.
   SharedKind getKind() const {
-    return cast<SharedKindAttr>(effect->getParameters()).getValue();
+    if (auto kind = dyn_cast_if_present<SharedKindAttr>(effect->getParameters()))
+      return kind.getValue();
+    return *getSharedKindFromResource(effect->getResource());
   }
 
 private:
